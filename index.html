@@ -25,7 +25,6 @@
   getAnalytics(app);
   const db = getDatabase(app);
 
-  // 從 URL 取得或建立行程 ID（分享用）
   const urlParams = new URLSearchParams(window.location.search);
   let tripId = urlParams.get('trip') || 'main';
   window.history.replaceState({}, '', '?trip=' + tripId);
@@ -40,7 +39,6 @@
     if (el) el.textContent = window.location.href;
   });
 
-  // 即時監聽資料庫
   onValue(ref(db, 'trips/' + tripId), snap => {
     window.TRIP_DATA = snap.val() || { title: '九州福岡 2026 十月', budget: 0, days: {} };
     if (window.renderAll) window.renderAll(window.TRIP_DATA);
@@ -75,7 +73,6 @@ body {
   flex-direction: column;
 }
 
-/* ── HEADER ── */
 header {
   background: var(--ink);
   color: var(--paper);
@@ -105,7 +102,6 @@ header {
 .share-box:hover { background: rgba(255,255,255,.14); }
 .share-box span  { display: block; color: var(--accent); font-size: .6rem; margin-bottom: 2px; text-transform: uppercase; letter-spacing: .06em; }
 
-/* ── LAYOUT ── */
 .main {
   display: grid;
   grid-template-columns: 420px 1fr;
@@ -114,7 +110,6 @@ header {
   min-height: 0;
 }
 
-/* ── LEFT: ITINERARY ── */
 .itinerary {
   overflow-y: auto;
   padding: 15px;
@@ -167,7 +162,6 @@ header {
 }
 .btn-add-day:hover { opacity: .88; transform: translateY(-1px); }
 
-/* ── DAY CARD ── */
 .day-card { background: var(--card); border-radius: var(--r); box-shadow: var(--shadow); overflow: hidden; }
 
 .day-header {
@@ -201,7 +195,6 @@ header {
 .btn-icon:hover         { background: var(--ink); color: #fff; border-color: var(--ink); }
 .btn-icon.danger:hover  { background: #c0392b;    color: #fff; border-color: #c0392b;    }
 
-/* ── SPOTS ── */
 .spots-list { list-style: none; }
 
 .spot-item {
@@ -251,7 +244,6 @@ header {
 .spot-item:hover .spot-actions { opacity: 1; }
 .btn-spot-del { background: transparent; border: none; color: #c0392b; cursor: pointer; font-size: .88rem; padding: 2px; }
 
-/* ── ADD SPOT ROW ── */
 .add-spot-row {
   display: flex; align-items: center; gap: 7px;
   padding: 8px 13px; border-top: 1px dashed rgba(0,0,0,.07);
@@ -264,7 +256,6 @@ header {
 }
 .btn-add-spot:hover { opacity: .85; }
 
-/* ── BUDGET SUMMARY ── */
 .budget-summary {
   background: var(--card); border-radius: var(--r); box-shadow: var(--shadow);
   padding: 11px 14px; display: flex; justify-content: space-between;
@@ -274,7 +265,6 @@ header {
 .remain.ok     { color: var(--green);  font-weight: 600; }
 .remain.over   { color: #c0392b;       font-weight: 600; }
 
-/* ── RIGHT: MAP ── */
 .map-panel { position: relative; display: flex; flex-direction: column; background: #e8e4db; }
 #map { flex: 1; width: 100%; }
 
@@ -303,16 +293,6 @@ header {
 }
 .map-nav-btn:hover { transform: translateY(-2px); opacity: .9; }
 
-.map-setup-msg {
-  display: flex; flex-direction: column; align-items: center;
-  justify-content: center; height: 100%; text-align: center; padding: 32px; gap: 12px;
-}
-.map-setup-msg .icon { font-size: 2.8rem; }
-.map-setup-msg h3    { font-size: .95rem; }
-.map-setup-msg p     { font-size: .78rem; color: var(--muted); line-height: 1.75; }
-.map-setup-msg code  { background: var(--cream); border-radius: 4px; padding: 1px 5px; font-size: .73rem; color: var(--accent); }
-
-/* ── EMPTY / TOAST ── */
 .empty-state { text-align: center; padding: 28px 16px; color: var(--muted); }
 .empty-state .icon { font-size: 2.2rem; margin-bottom: 8px; }
 .empty-state p { font-size: .82rem; }
@@ -347,8 +327,6 @@ header {
 </header>
 
 <div class="main">
-
-  <!-- ── LEFT ── -->
   <div class="itinerary">
     <div class="top-bar">
       <input class="trip-title-input" id="trip-title" placeholder="行程名稱" oninput="saveMeta()">
@@ -371,48 +349,24 @@ header {
     </div>
   </div>
 
-  <!-- ── RIGHT: MAP ── -->
   <div class="map-panel">
-    <div id="map-setup-msg" class="map-setup-msg">
-      <div class="icon">🗺️</div>
-      <h3>啟用 Google 地圖</h3>
-      <p>
-        請在 HTML 底部填入你的<br>
-        <code>Google Maps API Key</code><br><br>
-        前往 <strong>console.cloud.google.com</strong><br>
-        啟用以下三個 API：<br>
-        • Maps JavaScript API<br>
-        • Directions API<br>
-        • Geocoding API<br><br>
-        建立金鑰後貼入程式碼最底部<br>
-        <span style="color:var(--green)">✅ 免費額度足夠個人家庭使用</span>
-      </p>
-    </div>
     <div id="map"></div>
     <div class="map-day-tabs" id="map-day-tabs"></div>
     <button class="map-nav-btn" id="map-nav-btn" onclick="openNavigation()">
       🚗 開啟 Google Maps 導航
     </button>
   </div>
-
 </div>
 
 <div class="toast" id="toast"></div>
 
 <script>
-// ══════════════════════════════════════
-//  STATE
-// ══════════════════════════════════════
 let tripData = { title: '九州福岡 2026 十月', budget: 0, days: {} };
 let map, directionsService, directionsRenderers = {};
-let activeDay = null;
-let dragSrc   = null;
+let activeDay = null, dragSrc = null;
 
 const DAY_COLORS = ['#4a7c59','#c4783a','#2e6da4','#8e44ad','#b7770d','#16a085','#c0392b','#1a6b8a'];
 
-// ══════════════════════════════════════
-//  FIREBASE
-// ══════════════════════════════════════
 function saveToFirebase(data) {
   if (!window.DB || !window.TRIP_ID) return;
   window.dbSet(window.dbRef(window.DB, 'trips/' + window.TRIP_ID), data);
@@ -425,9 +379,6 @@ function saveMeta() {
   updateBudget();
 }
 
-// ══════════════════════════════════════
-//  RENDER
-// ══════════════════════════════════════
 window.renderAll = function(data) {
   tripData = data || { title: '', budget: 0, days: {} };
 
@@ -479,7 +430,6 @@ window.renderAll = function(data) {
   renderMapTabs(dayKeys);
   bindDrag();
   updateBudget();
-
   if (!activeDay || !tripData.days[activeDay]) activeDay = dayKeys[0];
   showDayOnMap(activeDay);
 };
@@ -508,9 +458,6 @@ function renderSpot(dayId, spot, i, color) {
     </li>`;
 }
 
-// ══════════════════════════════════════
-//  MAP TABS
-// ══════════════════════════════════════
 function renderMapTabs(dayKeys) {
   const container = document.getElementById('map-day-tabs');
   if (!map) { container.innerHTML = ''; return; }
@@ -523,13 +470,9 @@ function renderMapTabs(dayKeys) {
   }).join('');
 }
 
-// ══════════════════════════════════════
-//  MAP & ROUTING
-// ══════════════════════════════════════
 function initMap() {
-  document.getElementById('map-setup-msg').style.display = 'none';
   map = new google.maps.Map(document.getElementById('map'), {
-    center: { lat: 33.5902, lng: 130.4017 }, // 福岡市中心
+    center: { lat: 33.5902, lng: 130.4017 },
     zoom: 12,
     mapTypeControl: false,
     streetViewControl: false,
@@ -548,11 +491,9 @@ function initMap() {
 function showDayOnMap(dayId) {
   if (!map) return;
   activeDay = dayId;
-
   const dayKeys = Object.keys(tripData.days || {}).sort();
   renderMapTabs(dayKeys);
 
-  // 清除舊路線與標記
   Object.values(directionsRenderers).forEach(r => r.setMap(null));
   directionsRenderers = {};
 
@@ -567,7 +508,6 @@ function showDayOnMap(dayId) {
   const idx   = dayKeys.indexOf(dayId);
   const color = DAY_COLORS[idx % DAY_COLORS.length];
 
-  // 單一景點：只顯示標記
   if (spots.length === 1) {
     map.setCenter({ lat: spots[0].lat, lng: spots[0].lng });
     map.setZoom(14);
@@ -575,7 +515,6 @@ function showDayOnMap(dayId) {
     return;
   }
 
-  // 多景點：Directions API 規劃路線
   const origin      = { lat: spots[0].lat,              lng: spots[0].lng };
   const destination = { lat: spots[spots.length-1].lat, lng: spots[spots.length-1].lng };
   const waypoints   = spots.slice(1, -1).map(s => ({ location: { lat: s.lat, lng: s.lng }, stopover: true }));
@@ -617,9 +556,11 @@ function addMarker(spot, num, color) {
   });
   marker.addListener('click', () => {
     new google.maps.InfoWindow({
-      content: `<div style="font-family:'Noto Sans TC',sans-serif;padding:4px 6px">
-        <b>${spot.name}</b>${spot.time ? `<br><span style="color:#888;font-size:12px">⏰ ${spot.time}</span>` : ''}
+      content: `<div style="font-family:'Noto Sans TC',sans-serif;padding:4px 6px;min-width:120px">
+        <b style="font-size:13px">${spot.name}</b>
+        ${spot.time ? `<br><span style="color:#888;font-size:12px">⏰ ${spot.time}</span>` : ''}
         ${spot.note ? `<br><span style="color:#888;font-size:12px">📝 ${spot.note}</span>` : ''}
+        ${spot.cost ? `<br><span style="color:#c4783a;font-size:12px">💴 ${Number(spot.cost).toLocaleString()} 円</span>` : ''}
       </div>`
     }).open(map, marker);
   });
@@ -640,13 +581,9 @@ function openNavigation() {
   window.open(url, '_blank');
 }
 
-// ══════════════════════════════════════
-//  GEOCODE
-// ══════════════════════════════════════
 function geocodeAndSave(dayId, spotId, name) {
   if (!window.google || !map) return;
-  // 加上「福岡」提高日本景點精準度
-  const query = name.includes('福岡') || name.includes('九州') ? name : name + ' 福岡';
+  const query = name + ' 福岡 日本';
   new google.maps.Geocoder().geocode({ address: query, region: 'jp' }, (results, status) => {
     if (status === 'OK' && results[0]) {
       const loc = results[0].geometry.location;
@@ -660,13 +597,8 @@ function geocodeAndSave(dayId, spotId, name) {
   });
 }
 
-function geocodeSpot(dayId, spotId, name) {
-  if (name) geocodeAndSave(dayId, spotId, name);
-}
+function geocodeSpot(dayId, spotId, name) { if (name) geocodeAndSave(dayId, spotId, name); }
 
-// ══════════════════════════════════════
-//  DAY OPERATIONS
-// ══════════════════════════════════════
 function addDay() {
   if (!tripData.days) tripData.days = {};
   tripData.days['day_' + Date.now()] = { date: '', spots: {} };
@@ -692,9 +624,6 @@ function quickFocus(dayId) {
   if (el) el.focus();
 }
 
-// ══════════════════════════════════════
-//  SPOT OPERATIONS
-// ══════════════════════════════════════
 function getSpotsArray(day) {
   if (!day?.spots) return [];
   return Object.keys(day.spots).sort().map(k => ({ id: k, ...day.spots[k] }));
@@ -727,9 +656,6 @@ function deleteSpot(dayId, spotId) {
   showToast('已刪除景點');
 }
 
-// ══════════════════════════════════════
-//  BUDGET
-// ══════════════════════════════════════
 function updateBudget() {
   let total = 0;
   if (tripData.days) {
@@ -737,54 +663,41 @@ function updateBudget() {
       if (d.spots) Object.values(d.spots).forEach(s => { total += parseFloat(s.cost)||0; });
     });
   }
-  document.getElementById('spent-total').textContent   = total.toLocaleString();
-  const budget  = parseFloat(tripData.budget) || 0;
-  const remain  = budget - total;
-  const el      = document.getElementById('remain-budget');
+  document.getElementById('spent-total').textContent = total.toLocaleString();
+  const budget = parseFloat(tripData.budget) || 0;
+  const remain = budget - total;
+  const el = document.getElementById('remain-budget');
   el.textContent = remain.toLocaleString();
-  el.className   = 'remain ' + (remain >= 0 ? 'ok' : 'over');
+  el.className = 'remain ' + (remain >= 0 ? 'ok' : 'over');
 }
 
-// ══════════════════════════════════════
-//  DRAG & DROP
-// ══════════════════════════════════════
 function bindDrag() {
   document.querySelectorAll('.spot-item').forEach(item => {
-    item.addEventListener('dragstart', e => {
-      dragSrc = item; item.classList.add('dragging');
-      e.dataTransfer.effectAllowed = 'move';
-    });
-    item.addEventListener('dragend', () => {
-      item.classList.remove('dragging');
-      document.querySelectorAll('.spot-item').forEach(i => i.classList.remove('drag-over'));
-    });
+    item.addEventListener('dragstart', e => { dragSrc = item; item.classList.add('dragging'); e.dataTransfer.effectAllowed = 'move'; });
+    item.addEventListener('dragend',   () => { item.classList.remove('dragging'); document.querySelectorAll('.spot-item').forEach(i => i.classList.remove('drag-over')); });
     item.addEventListener('dragover',  e => { e.preventDefault(); if(item!==dragSrc) item.classList.add('drag-over'); });
     item.addEventListener('dragleave', () => item.classList.remove('drag-over'));
     item.addEventListener('drop', e => {
       e.stopPropagation();
       item.classList.remove('drag-over');
       if (!dragSrc || dragSrc === item) return;
-      const srcDayId = dragSrc.dataset.day;
-      const dstDayId = item.dataset.day;
-      if (srcDayId !== dstDayId) return;
-      const spots = tripData.days[srcDayId].spots;
+      if (dragSrc.dataset.day !== item.dataset.day) return;
+      const dayId = dragSrc.dataset.day;
+      const spots = tripData.days[dayId].spots;
       const keys  = Object.keys(spots).sort();
-      const si    = keys.indexOf(dragSrc.dataset.spot);
-      const di    = keys.indexOf(item.dataset.spot);
+      const si = keys.indexOf(dragSrc.dataset.spot);
+      const di = keys.indexOf(item.dataset.spot);
       keys.splice(di, 0, keys.splice(si, 1)[0]);
       const newSpots = {};
       keys.forEach((k,i) => { newSpots['spot_' + String(i).padStart(8,'0')] = spots[k]; });
-      tripData.days[srcDayId].spots = newSpots;
+      tripData.days[dayId].spots = newSpots;
       saveToFirebase(tripData);
       showToast('順序已更新，路線重新計算中 ✓');
-      setTimeout(() => { if (activeDay === srcDayId) showDayOnMap(activeDay); }, 400);
+      setTimeout(() => { if (activeDay === dayId) showDayOnMap(activeDay); }, 400);
     });
   });
 }
 
-// ══════════════════════════════════════
-//  UTILS
-// ══════════════════════════════════════
 function esc(str) {
   return String(str).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
 }
@@ -802,14 +715,8 @@ function showToast(msg) {
 }
 </script>
 
-<!--
-  ⚠️  最後一步：填入 Google Maps API Key
-  1. 前往 console.cloud.google.com
-  2. 啟用：Maps JavaScript API + Directions API + Geocoding API
-  3. 建立 API 金鑰，取代下方 YOUR_GOOGLE_MAPS_API_KEY
-  4. 移除這行的 HTML 注釋符號（刪除最前面的 <!-- 和最後面的 -->）
--->
-<!-- <script src="https://maps.googleapis.com/maps/api/js?key=YOUR_GOOGLE_MAPS_API_KEY&callback=initMap&libraries=places,geometry" async defer></script> -->
+<!-- Google Maps API - fukuoka-kyushu-oct2026 -->
+<script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyC-QgKIKtZkmWIOXawmGBHVci4kKJOF7W0&callback=initMap&libraries=places,geometry" async defer></script>
 
 </body>
 </html>
