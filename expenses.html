@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>費用明細｜TripMaster</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700;900&family=Playfair+Display:wght@700&display=swap" rel="stylesheet">
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/12.12.1/firebase-app.js";
+import { getAuth, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/12.12.1/firebase-auth.js";
+import { getDatabase, ref, onValue, push, set, remove, get } from "https://www.gstatic.com/firebasejs/12.12.1/firebase-database.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyCT9AFuUGMuikwcA2wFYAbEs1gxke5i4dA",
+  authDomain: "fukuoka-kyushu-oct2026.firebaseapp.com",
+  databaseURL: "https://fukuoka-kyushu-oct2026-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "fukuoka-kyushu-oct2026",
+  storageBucket: "fukuoka-kyushu-oct2026.firebasestorage.app",
+  messagingSenderId: "101376635642",
+  appId: "1:101376635642:web:d28651919e1df014bb4f43"
+};
+
+const app  = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db   = getDatabase(app);
+
+const urlParams = new URLSearchParams(location.search);
+const projectId = urlParams.get('project') || 'main';
+
+let currentUser = null;
+let members = [];  // [{id, name}]
+let expenses = []; // all expense records
+
+onAuthStateChanged(auth, async user => {
+  if (!user) { location.href = 'index.html'; return; }
+  currentUser = user;
+  const snap = await get(ref(db, `users/${user.uid}`));
+  const ud = snap.val();
+  if (!ud || (ud.status !== 'approved' && !ud.isAdmin)) { location.href = 'index.html'; return; }
+  loadProject();
+  loadMembers();
+  loadExpenses();
+});
+
+function loadProject() {
+  onValue(ref(db, `projects/${projectId}`), snap => {
+    const p = snap.val();
+    if (p) document.getElementById('project-title').textContent = p.title;
+  });
+}
+
+function loadMembers() {
+  onValue(ref(db, `projects/${projectId}/members`), snap => {
+    const data = snap.val() || {};
+    members = Object.entries(data).map(([id, m]) => ({ id, name: m.name || id }));
+    renderMemberSelects();
+  });
+}
+
+function renderMemberSelects() {
+  const paidBy = document.getElementById('exp-paidby');
+  const split  = document.getElementById('split-members');
+  const opts   = members.map(m => `<option value="${m.id}">${m.name}</option>`).join('');
+  paidBy.innerHTML = opts;
+  split.innerHTML  = members.map(m => `
+    <label class="member-check">
+      <input type="checkbox" value="${m.id}" checked> ${m.name}
+    </label>`).join('');
+}
+
+function loadExpenses() {
+  onValue(ref(db, `expenses/${projectId}`), snap => {
+    const data = snap.val() || {};
+    expenses = Object.entries(data).map(([id, e]) => ({ id, ...e }));
+    renderExpenses();
+    renderSettlement();
+    renderSummary();
+  });
+}
+
+// ── RENDER EXPENSES ──────────────────────────
+function renderExpenses() {
+  const container = document.getElementById('expense-list');
+  if (expenses.length === 0) {
+    container.innerHTML = `<div class="empty-msg">📝 還沒有費用紀錄，點擊「新增費用」開始記帳！</div>`;
+    return;
+  }
+
+  const sorted = [...expenses].sort((a,b) => (b.date||'') > (a.date||'') ? 1 : -1);
+
+  container.innerHTML = sorted.map(exp => {
+    const payer = members.find(m => m.id === exp.paidBy)?.name || exp.paidBy || '未知';
+    const splitNames = (exp.splitWith||[]).map(id => members.find(m=>m.id===id)?.name || id).join('、');
+    const icon = CATEGORY_ICONS[exp.category] || '💰';
+    const splitMethodLabel = { equal: '平均分攤', custom: '自訂比例', payer_only: '付款人自付' }[exp.splitMethod] || '';
+    return `
+      <div class="expense-card">
+        <div class="exp-icon">${icon}</div>
+        <div class="exp-body">
+          <div class="exp-top">
+            <span class="exp-title">${exp.title}</span>
+            <span class="exp-amount">¥${Number(exp.amount||0).toLocaleString()}</span>
+          </div>
+          <div class="exp-meta">
+            <span class="tag">${exp.category||'其他'}</span>
+            <span>📅 ${exp.date||'未設日期'}</span>
+            <span>💳 ${payer} 代墊</span>
+            <span>👥 ${splitMethodLabel}：${splitNames}</span>
+          </div>
+          ${exp.note ? `<div class="exp-note">📝 ${exp.note}</div>` : ''}
+        </div>
+        <button class="btn-del-exp" onclick="deleteExpense('${exp.id}')">✕</button>
+      </div>`;
+  }).join('');
+}
+
+// ── SETTLEMENT ────────────────────────────────
+function renderSettlement() {
+  const container = document.getElementById('settlement-table');
+  if (members.length === 0 || expenses.length === 0) {
+    container.innerHTML = '<div class="empty-msg">新增費用後自動計算結算</div>';
+    return;
+  }
+
+  // 計算每人淨欠額
+  const balance = {};
+  members.forEach(m => balance[m.id] = 0);
+
+  expenses.forEach(exp => {
+    const amount = parseFloat(exp.amount) || 0;
+    const payer  = exp.paidBy;
+    const splits = exp.splitWith || [];
+    if (splits.length === 0) return;
+
+    if (exp.splitMethod === 'equal') {
+      const share = amount / splits.length;
+      splits.forEach(uid => {
+        if (uid !== payer) {
+          balance[uid]  = (balance[uid]||0)  - share; // 欠款人
+          balance[payer] = (balance[payer]||0) + share; // 代墊人
+        }
+      });
+    } else if (exp.splitMethod === 'custom' && exp.customRatios) {
+      const total = Object.values(exp.customRatios).reduce((a,b) => a+b, 0);
+      splits.forEach(uid => {
+        if (uid !== payer) {
+          const share = amount * (exp.customRatios[uid]||0) / total;
+          balance[uid]  = (balance[uid]||0)  - share;
+          balance[payer] = (balance[payer]||0) + share;
+        }
+      });
+    }
+  });
+
+  // 計算最少轉帳次數
+  const debtors  = members.filter(m => (balance[m.id]||0) < -0.5).map(m => ({ ...m, amt: balance[m.id] }));
+  const creditors= members.filter(m => (balance[m.id]||0) >  0.5).map(m => ({ ...m, amt: balance[m.id] }));
+
+  const transactions = [];
+  let di = 0, ci = 0;
+  const d = debtors.map(x=>({...x}));
+  const c = creditors.map(x=>({...x}));
+
+  while (di < d.length && ci < c.length) {
+    const pay = Math.min(-d[di].amt, c[ci].amt);
+    transactions.push({ from: d[di].name, to: c[ci].name, amount: Math.round(pay) });
+    d[di].amt += pay;
+    c[ci].amt -= pay;
+    if (Math.abs(d[di].amt) < 0.5) di++;
+    if (Math.abs(c[ci].amt) < 0.5) ci++;
+  }
+
+  // 個人總覽
+  const summaryRows = members.map(m => {
+    const totalPaid   = expenses.reduce((s, e) => s + (e.paidBy === m.id ? parseFloat(e.amount)||0 : 0), 0);
+    const totalOwed   = expenses.reduce((s, e) => {
+      if (!e.splitWith?.includes(m.id)) return s;
+      if (e.splitMethod === 'equal') return s + (parseFloat(e.amount)||0) / (e.splitWith.length||1);
+      if (e.splitMethod === 'custom' && e.customRatios) {
+        const t = Object.values(e.customRatios).reduce((a,b)=>a+b,0);
+        return s + (parseFloat(e.amount)||0) * (e.customRatios[m.id]||0) / t;
+      }
+      return s;
+    }, 0);
+    const net = totalPaid - totalOwed;
+    return `<tr>
+      <td>${m.name}</td>
+      <td class="num">¥${Math.round(totalPaid).toLocaleString()}</td>
+      <td class="num">¥${Math.round(totalOwed).toLocaleString()}</td>
+      <td class="num ${net>=0?'positive':'negative'}">${net>=0?'+':''}¥${Math.round(net).toLocaleString()}</td>
+    </tr>`;
+  }).join('');
+
+  const txRows = transactions.length === 0
+    ? '<div class="settle-done">✅ 所有費用已結清！</div>'
+    : transactions.map(t => `
+        <div class="tx-row">
+          <span class="tx-from">${t.from}</span>
+          <span class="tx-arrow">→ 付給 →</span>
+          <span class="tx-to">${t.to}</span>
+          <span class="tx-amount">¥${t.amount.toLocaleString()}</span>
+        </div>`).join('');
+
+  container.innerHTML = `
+    <div class="settle-section">
+      <div class="settle-title">📊 個人費用總覽</div>
+      <table class="summary-table">
+        <thead><tr><th>成員</th><th>已付款</th><th>應付款</th><th>差額</th></tr></thead>
+        <tbody>${summaryRows}</tbody>
+      </table>
+    </div>
+    <div class="settle-section">
+      <div class="settle-title">💸 最終轉帳清單</div>
+      ${txRows}
+    </div>`;
+}
+
+function renderSummary() {
+  const total = expenses.reduce((s, e) => s + (parseFloat(e.amount)||0), 0);
+  document.getElementById('total-amount').textContent = `¥${Math.round(total).toLocaleString()}`;
+  document.getElementById('expense-count').textContent = expenses.length;
+
+  // 分類統計
+  const byCategory = {};
+  expenses.forEach(e => {
+    const c = e.category || '其他';
+    byCategory[c] = (byCategory[c]||0) + (parseFloat(e.amount)||0);
+  });
+  const catHtml = Object.entries(byCategory)
+    .sort((a,b) => b[1]-a[1])
+    .map(([c, amt]) => `
+      <div class="cat-row">
+        <span>${CATEGORY_ICONS[c]||'💰'} ${c}</span>
+        <span>¥${Math.round(amt).toLocaleString()}</span>
+        <div class="cat-bar-bg"><div class="cat-bar" style="width:${Math.round(amt/total*100)}%"></div></div>
+      </div>`).join('');
+  document.getElementById('category-breakdown').innerHTML = catHtml || '<div class="empty-msg">—</div>';
+}
+
+// ── ADD EXPENSE ───────────────────────────────
+window.openExpenseModal = () => {
+  document.getElementById('modal-expense').style.display = 'flex';
+};
+window.closeExpenseModal = () => {
+  document.getElementById('modal-expense').style.display = 'none';
+};
+
+window.addExpense = async () => {
+  const title  = document.getElementById('exp-title').value.trim();
+  const amount = parseFloat(document.getElementById('exp-amount').value);
+  const cat    = document.getElementById('exp-category').value;
+  const date   = document.getElementById('exp-date').value;
+  const paidBy = document.getElementById('exp-paidby').value;
+  const method = document.getElementById('exp-split-method').value;
+  const note   = document.getElementById('exp-note').value.trim();
+  const splitWith = [...document.querySelectorAll('#split-members input:checked')].map(i => i.value);
+
+  if (!title) { alert('請輸入項目名稱'); return; }
+  if (isNaN(amount) || amount <= 0) { alert('請輸入正確金額'); return; }
+
+  const expRef = push(ref(db, `expenses/${projectId}`));
+  await set(expRef, { title, amount, category: cat, date, paidBy, splitMethod: method, splitWith, note, createdAt: Date.now() });
+
+  closeExpenseModal();
+  document.getElementById('exp-title').value = '';
+  document.getElementById('exp-amount').value = '';
+  document.getElementById('exp-note').value = '';
+  showToast('已新增費用 ✓');
+};
+
+window.deleteExpense = async id => {
+  if (!confirm('確定刪除此筆費用？')) return;
+  await remove(ref(db, `expenses/${projectId}/${id}`));
+  showToast('已刪除');
+};
+
+const CATEGORY_ICONS = {
+  '餐廳': '🍜', '小吃': '🍡', '交通': '🚗', '住宿': '🏨',
+  '門票': '🎟️', '購物': '🛍️', '停車': '🅿️', '加油': '⛽',
+  '景點': '🗺️', '醫藥': '💊', '其他': '💰'
+};
+
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2200);
+}
+
+window.switchTab = (tab) => {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-panel').forEach(p => p.style.display = 'none');
+  document.querySelector(`[data-tab="${tab}"]`).classList.add('active');
+  document.getElementById(`panel-${tab}`).style.display = 'block';
+};
+</script>
+
+<style>
+:root {
+  --night:#0d1117; --surface:#161b22; --surface2:#21262d;
+  --border:rgba(255,255,255,0.08); --text:#e6edf3; --muted:#8b949e;
+  --accent:#f78166; --gold:#d4a843; --green:#39d353; --r:12px;
+}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:'Noto Sans TC',sans-serif;background:var(--night);color:var(--text);min-height:100vh;}
+
+nav{background:rgba(13,17,23,.95);backdrop-filter:blur(16px);border-bottom:1px solid var(--border);padding:0 24px;display:flex;align-items:center;height:60px;gap:12px;position:sticky;top:0;z-index:100;}
+.nav-logo{font-family:'Playfair Display',serif;font-size:1.2rem;background:linear-gradient(135deg,#f78166,#d4a843);-webkit-background-clip:text;-webkit-text-fill-color:transparent;text-decoration:none;}
+.nav-back{font-size:.8rem;color:var(--muted);text-decoration:none;}
+.nav-back:hover{color:var(--text);}
+.nav-spacer{flex:1;}
+#project-title{font-size:.85rem;color:var(--muted);}
+
+.page-header{padding:24px;max-width:1100px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:14px;}
+.page-header h1{font-family:'Playfair Display',serif;font-size:1.6rem;}
+.btn-add-exp{background:linear-gradient(135deg,#f78166,#d4a843);color:#fff;border:none;border-radius:10px;padding:10px 20px;font-size:.85rem;font-weight:700;cursor:pointer;font-family:inherit;transition:opacity .15s;}
+.btn-add-exp:hover{opacity:.88;}
+
+/* STATS BAR */
+.stats-bar{display:flex;gap:14px;padding:0 24px 20px;max-width:1100px;margin:0 auto;flex-wrap:wrap;}
+.stat-pill{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px 18px;flex:1;min-width:140px;}
+.stat-pill .val{font-size:1.5rem;font-weight:900;background:linear-gradient(135deg,#f78166,#d4a843);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}
+.stat-pill .lbl{font-size:.72rem;color:var(--muted);margin-top:2px;}
+
+.main-content{max-width:1100px;margin:0 auto;padding:0 24px 60px;}
+
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--border);margin-bottom:20px;}
+.tab-btn{background:transparent;border:none;color:var(--muted);padding:10px 18px;font-size:.83rem;cursor:pointer;font-family:inherit;border-bottom:2px solid transparent;transition:color .15s,border-color .15s;}
+.tab-btn.active{color:var(--text);border-color:var(--accent);}
+
+/* EXPENSE CARDS */
+.expense-card{display:flex;align-items:flex-start;gap:12px;background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:14px 16px;margin-bottom:10px;transition:border-color .2s;}
+.expense-card:hover{border-color:rgba(247,129,102,0.25);}
+.exp-icon{width:40px;height:40px;background:var(--surface2);border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:1.3rem;flex-shrink:0;}
+.exp-body{flex:1;min-width:0;}
+.exp-top{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-bottom:6px;}
+.exp-title{font-size:.92rem;font-weight:600;}
+.exp-amount{font-size:1rem;font-weight:900;color:var(--accent);white-space:nowrap;}
+.exp-meta{display:flex;flex-wrap:wrap;gap:8px;font-size:.72rem;color:var(--muted);}
+.tag{background:var(--surface2);border-radius:5px;padding:1px 7px;}
+.exp-note{font-size:.74rem;color:var(--muted);margin-top:6px;font-style:italic;}
+.btn-del-exp{background:transparent;border:none;color:var(--muted);cursor:pointer;font-size:.9rem;padding:4px;flex-shrink:0;transition:color .15s;}
+.btn-del-exp:hover{color:#f85149;}
+
+/* SETTLEMENT */
+.settle-section{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:20px;margin-bottom:14px;}
+.settle-title{font-size:.8rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-bottom:14px;}
+.summary-table{width:100%;border-collapse:collapse;font-size:.83rem;}
+.summary-table th{text-align:left;color:var(--muted);font-size:.72rem;padding:6px 8px;border-bottom:1px solid var(--border);}
+.summary-table td{padding:8px;border-bottom:1px solid rgba(255,255,255,0.04);}
+.summary-table td.num{text-align:right;font-variant-numeric:tabular-nums;}
+.positive{color:var(--green);font-weight:700;}
+.negative{color:#f85149;font-weight:700;}
+
+.tx-row{display:flex;align-items:center;gap:10px;padding:12px 0;border-bottom:1px solid rgba(255,255,255,0.04);flex-wrap:wrap;}
+.tx-from{font-weight:700;color:#f85149;}
+.tx-arrow{color:var(--muted);font-size:.8rem;}
+.tx-to{font-weight:700;color:var(--green);}
+.tx-amount{margin-left:auto;font-weight:900;font-size:1rem;color:var(--gold);}
+.settle-done{text-align:center;padding:20px;color:var(--green);font-size:.9rem;}
+
+/* CATEGORY */
+.cat-row{display:grid;grid-template-columns:120px 80px 1fr;align-items:center;gap:10px;margin-bottom:10px;font-size:.82rem;}
+.cat-bar-bg{background:var(--surface2);border-radius:4px;height:6px;}
+.cat-bar{background:linear-gradient(90deg,#f78166,#d4a843);border-radius:4px;height:6px;transition:width .4s;}
+
+/* MODAL */
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.75);display:none;align-items:center;justify-content:center;z-index:1000;padding:16px;backdrop-filter:blur(4px);}
+.modal{background:var(--surface);border:1px solid var(--border);border-radius:20px;padding:28px;width:100%;max-width:500px;max-height:90vh;overflow-y:auto;}
+.modal h2{font-family:'Playfair Display',serif;font-size:1.3rem;margin-bottom:20px;}
+.form-group{margin-bottom:14px;}
+.form-group label{display:block;font-size:.74rem;color:var(--muted);margin-bottom:5px;letter-spacing:.04em;}
+.form-group input,.form-group select,.form-group textarea{width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:9px 13px;color:var(--text);font-size:.85rem;font-family:inherit;outline:none;transition:border-color .2s;}
+.form-group input:focus,.form-group select:focus{border-color:rgba(247,129,102,0.5);}
+.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+.member-check{display:inline-flex;align-items:center;gap:6px;font-size:.82rem;margin-right:10px;cursor:pointer;}
+.modal-actions{display:flex;gap:10px;margin-top:20px;}
+.btn-primary{flex:1;background:linear-gradient(135deg,#f78166,#d4a843);color:#fff;border:none;border-radius:10px;padding:12px;font-size:.88rem;font-weight:700;cursor:pointer;font-family:inherit;}
+.btn-cancel{background:var(--surface2);color:var(--muted);border:1px solid var(--border);border-radius:10px;padding:12px 18px;font-size:.88rem;cursor:pointer;font-family:inherit;}
+
+.empty-msg{text-align:center;padding:36px 20px;color:var(--muted);font-size:.85rem;line-height:1.7;}
+.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%) translateY(50px);background:var(--surface);border:1px solid var(--border);color:var(--text);padding:10px 20px;border-radius:20px;font-size:.82rem;opacity:0;transition:transform .3s,opacity .3s;z-index:999;pointer-events:none;}
+.toast.show{transform:translateX(-50%) translateY(0);opacity:1;}
+
+@media(max-width:600px){.form-grid{grid-template-columns:1fr;}.cat-row{grid-template-columns:100px 70px 1fr;}.tx-row{gap:6px;}.tx-amount{margin-left:0;width:100%;}}
+</style>
+</head>
+<body>
+
+<nav>
+  <a class="nav-logo" href="index.html">TripMaster</a>
+  <a class="nav-back" href="index.html">← 回首頁</a>
+  <div class="nav-spacer"></div>
+  <span id="project-title"></span>
+</nav>
+
+<div class="page-header">
+  <h1>💴 費用明細</h1>
+  <button class="btn-add-exp" onclick="openExpenseModal()">＋ 新增費用</button>
+</div>
+
+<div class="stats-bar">
+  <div class="stat-pill">
+    <div class="val" id="total-amount">¥0</div>
+    <div class="lbl">總花費</div>
+  </div>
+  <div class="stat-pill">
+    <div class="val" id="expense-count">0</div>
+    <div class="lbl">筆費用</div>
+  </div>
+</div>
+
+<div class="main-content">
+  <div class="tabs">
+    <button class="tab-btn active" data-tab="list" onclick="switchTab('list')">費用清單</button>
+    <button class="tab-btn" data-tab="settle" onclick="switchTab('settle')">💸 結算</button>
+    <button class="tab-btn" data-tab="chart" onclick="switchTab('chart')">📊 分類統計</button>
+  </div>
+
+  <div class="tab-panel" id="panel-list">
+    <div id="expense-list"><div class="empty-msg">載入中...</div></div>
+  </div>
+
+  <div class="tab-panel" id="panel-settle" style="display:none">
+    <div id="settlement-table"><div class="empty-msg">載入中...</div></div>
+  </div>
+
+  <div class="tab-panel" id="panel-chart" style="display:none">
+    <div class="settle-section">
+      <div class="settle-title">分類費用統計</div>
+      <div id="category-breakdown"></div>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL: 新增費用 -->
+<div class="modal-overlay" id="modal-expense">
+  <div class="modal">
+    <h2>＋ 新增費用</h2>
+
+    <div class="form-group">
+      <label>項目名稱</label>
+      <input id="exp-title" type="text" placeholder="例：日田まぶし千屋 晚餐">
+    </div>
+
+    <div class="form-grid">
+      <div class="form-group">
+        <label>金額（日圓）</label>
+        <input id="exp-amount" type="number" placeholder="0">
+      </div>
+      <div class="form-group">
+        <label>日期</label>
+        <input id="exp-date" type="date">
+      </div>
+    </div>
+
+    <div class="form-grid">
+      <div class="form-group">
+        <label>分類</label>
+        <select id="exp-category">
+          <option value="餐廳">🍜 餐廳</option>
+          <option value="小吃">🍡 小吃</option>
+          <option value="交通">🚗 交通</option>
+          <option value="住宿">🏨 住宿</option>
+          <option value="門票">🎟️ 門票</option>
+          <option value="購物">🛍️ 購物</option>
+          <option value="停車">🅿️ 停車</option>
+          <option value="加油">⛽ 加油</option>
+          <option value="景點">🗺️ 景點</option>
+          <option value="醫藥">💊 醫藥</option>
+          <option value="其他">💰 其他</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>代墊人</label>
+        <select id="exp-paidby"></select>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label>分攤方式</label>
+      <select id="exp-split-method">
+        <option value="equal">平均分攤</option>
+        <option value="payer_only">付款人自付（不分攤）</option>
+        <option value="custom">自訂比例（未來擴充）</option>
+      </select>
+    </div>
+
+    <div class="form-group">
+      <label>分攤成員（勾選參與者）</label>
+      <div id="split-members"></div>
+    </div>
+
+    <div class="form-group">
+      <label>備註（選填）</label>
+      <input id="exp-note" type="text" placeholder="例：含小費，爸媽代墊">
+    </div>
+
+    <div class="modal-actions">
+      <button class="btn-cancel" onclick="closeExpenseModal()">取消</button>
+      <button class="btn-primary" onclick="addExpense()">新增費用</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+document.getElementById('modal-expense').addEventListener('click', function(e) {
+  if (e.target === this) closeExpenseModal();
+});
+// 設定預設日期為今天
+document.getElementById('exp-date').value = new Date().toISOString().split('T')[0];
+</script>
+</body>
+</html>
