@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>行程匯入工具｜TripMaster</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;700;900&family=Playfair+Display:wght@700&display=swap" rel="stylesheet">
+
+<style>
+:root {
+  --night:#0d1117; --surface:#161b22; --surface2:#21262d;
+  --border:rgba(255,255,255,0.08); --text:#e6edf3; --muted:#8b949e;
+  --accent:#f78166; --gold:#d4a843; --green:#39d353; --red:#f85149;
+}
+* { box-sizing:border-box; margin:0; padding:0; }
+body {
+  font-family:'Noto Sans TC',sans-serif;
+  background:var(--night); color:var(--text);
+  min-height:100vh;
+  display:flex; align-items:center; justify-content:center;
+  padding:20px;
+}
+.card {
+  background:var(--surface); border:1px solid var(--border);
+  border-radius:16px; padding:36px;
+  max-width:680px; width:100%;
+  box-shadow:0 24px 60px rgba(0,0,0,0.5);
+}
+h1 {
+  font-family:'Playfair Display',serif;
+  background:linear-gradient(135deg,#f78166,#d4a843);
+  -webkit-background-clip:text; -webkit-text-fill-color:transparent;
+  font-size:1.8rem; margin-bottom:6px;
+}
+.subtitle { color:var(--muted); font-size:.85rem; margin-bottom:24px; }
+
+.user-bar {
+  display:flex; align-items:center; gap:10px;
+  background:var(--surface2); border:1px solid var(--border);
+  border-radius:10px; padding:10px 14px;
+  margin-bottom:20px; font-size:.82rem;
+}
+.user-bar img { width:32px; height:32px; border-radius:50%; }
+.user-bar .uname { font-weight:600; }
+.user-bar .uemail { color:var(--muted); font-size:.75rem; }
+
+.info-box {
+  background:var(--surface2); border:1px solid var(--border);
+  border-radius:10px; padding:16px;
+  margin-bottom:20px; font-size:.82rem; line-height:1.7;
+}
+.info-box .lbl { color:var(--muted); font-size:.7rem; text-transform:uppercase; letter-spacing:.06em; }
+.info-box code { color:var(--accent); font-size:.78rem; }
+
+.btn-import, .btn-google {
+  width:100%;
+  border:none; border-radius:12px;
+  padding:14px; font-size:.95rem; font-weight:700;
+  cursor:pointer; font-family:inherit;
+  transition:opacity .15s, transform .15s;
+  display:flex; align-items:center; justify-content:center; gap:10px;
+}
+.btn-import {
+  background:linear-gradient(135deg,#f78166,#d4a843);
+  color:#fff;
+}
+.btn-import:hover { opacity:.9; transform:translateY(-1px); }
+.btn-import:disabled { opacity:.5; cursor:not-allowed; transform:none; }
+.btn-google { background:#fff; color:#1a1a1a; }
+.btn-google:hover { transform:translateY(-1px); }
+.btn-google img { width:20px; }
+
+.btn-logout {
+  color:var(--muted); font-size:.78rem;
+  background:none; border:none; cursor:pointer; font-family:inherit;
+  text-decoration:underline;
+}
+.btn-logout:hover { color:var(--text); }
+
+.log {
+  background:#000; border:1px solid var(--border);
+  border-radius:8px; padding:12px;
+  margin-top:16px;
+  font-family: 'Courier New', monospace;
+  font-size:.75rem; line-height:1.6;
+  max-height:280px; overflow-y:auto;
+  white-space:pre-wrap;
+  display:none;
+}
+.log.show { display:block; }
+.log .ok { color:var(--green); }
+.log .err { color:var(--red); }
+.log .info { color:var(--muted); }
+.log .step { color:var(--gold); font-weight:700; }
+
+.warn-box {
+  background:rgba(247,129,102,0.08);
+  border:1px solid rgba(247,129,102,0.25);
+  border-radius:8px; padding:10px 12px;
+  margin-bottom:16px;
+  font-size:.78rem; color:var(--accent); line-height:1.6;
+}
+.hidden { display:none !important; }
+.loading-state { text-align:center; padding:30px; color:var(--muted); font-size:.85rem; }
+
+.mode-tip {
+  background:rgba(57,211,83,0.06);
+  border:1px solid rgba(57,211,83,0.2);
+  border-radius:8px; padding:8px 12px;
+  margin-bottom:14px;
+  font-size:.72rem; color:var(--green); line-height:1.5;
+}
+</style>
+</head>
+<body>
+
+<div class="card">
+  <h1>📥 福岡行程匯入工具</h1>
+  <div class="subtitle">同時建立旅遊專案 + 寫入 6 天 31 景點</div>
+
+  <div id="state-loading" class="loading-state">⏳ 連線到 Firebase...</div>
+
+  <!-- 未登入 -->
+  <div id="state-login" class="hidden">
+    <div class="warn-box">
+      🔐 需登入管理員帳號才能寫入資料庫
+    </div>
+    <button class="btn-google" id="btn-login" onclick="loginWithGoogle()">
+      <img src="https://www.google.com/favicon.ico" alt="Google">
+      使用 Google 帳號登入
+    </button>
+    <div class="mode-tip" id="mode-tip" style="margin-top:14px"></div>
+  </div>
+
+  <!-- 非管理員 -->
+  <div id="state-not-admin" class="hidden">
+    <div class="warn-box" style="background:rgba(248,81,73,0.08); border-color:rgba(248,81,73,0.25); color:var(--red)">
+      ⛔ 此工具僅限管理員使用
+    </div>
+    <p id="not-admin-email" style="font-size:.85rem; color:var(--muted); margin-bottom:14px"></p>
+    <button class="btn-google" onclick="logout()" style="background:var(--surface2); color:var(--text)">
+      切換帳號
+    </button>
+  </div>
+
+  <!-- 已登入 -->
+  <div id="state-ready" class="hidden">
+    <div class="user-bar">
+      <img id="user-photo" src="" alt="">
+      <div>
+        <div class="uname" id="user-name">—</div>
+        <div class="uemail" id="user-email">—</div>
+      </div>
+      <div style="flex:1"></div>
+      <button class="btn-logout" onclick="logout()">登出</button>
+    </div>
+
+    <div class="warn-box">
+      ⚠️ 將寫入兩個節點，若已存在會被覆蓋：<br>
+      • <code>projects/main</code> — 首頁卡片資料<br>
+      • <code>trips/main</code> — 行程內容（6 天 31 景點）
+    </div>
+
+    <div class="info-box">
+      <div class="lbl">行程</div>
+      九州福岡 2026 十月 · ✈️ · 預算 ¥250,000<br>
+      <div class="lbl" style="margin-top:8px">日期</div>
+      2026-10-01 ～ 2026-10-06
+    </div>
+
+    <button class="btn-import" id="btn-import" onclick="runImport()">🚀 開始匯入</button>
+
+    <div class="log" id="log"></div>
+  </div>
+</div>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/12.12.1/firebase-app.js";
+import { getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged }
+  from "https://www.gstatic.com/firebasejs/12.12.1/firebase-auth.js";
+import { getDatabase, ref, set, get }
+  from "https://www.gstatic.com/firebasejs/12.12.1/firebase-database.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyCT9AFuUGMuikwcA2wFYAbEs1gxke5i4dA",
+  authDomain: "fukuoka-kyushu-oct2026.firebaseapp.com",
+  databaseURL: "https://fukuoka-kyushu-oct2026-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "fukuoka-kyushu-oct2026",
+  storageBucket: "fukuoka-kyushu-oct2026.firebasestorage.app",
+  messagingSenderId: "101376635642",
+  appId: "1:101376635642:web:d28651919e1df014bb4f43"
+};
+
+const ADMIN_EMAIL = "a45436@gmail.com";
+const PROJECT_ID  = "main";
+
+const app  = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db   = getDatabase(app);
+
+// 偵測執行環境
+const isFile = location.protocol === 'file:';
+const isHttp = location.protocol === 'http:' || location.protocol === 'https:';
+
+// 顯示對應提示
+const tipEl = document.getElementById('mode-tip');
+if (isFile) {
+  tipEl.innerHTML = '✓ 偵測到本機檔案模式，將使用彈窗登入（請允許彈出視窗）';
+} else {
+  tipEl.innerHTML = `✓ 偵測到網址模式（${location.hostname}），將使用彈窗登入`;
+}
+
+// 處理 redirect 結果（防萬一）
+getRedirectResult(auth).catch(() => {});
+
+// ── 行程資料 ──
+const TRIP = {
+  title: "九州福岡 2026 十月",
+  budget: 250000,
+  days: {
+    "day_01_20261001": {
+      date: "2026-10-01",
+      spots: {
+        "spot_00000001": { name:"福岡機場 國際線航廈",          type:"transport",  time:"09:30", note:"抵達、入境、領行李", cost:0,     lat:33.5859, lng:130.4509 },
+        "spot_00000002": { name:"福岡機場 租車中心",            type:"transport",  time:"10:30", note:"取車（Times / Toyota Rent）", cost:0, lat:33.5870, lng:130.4490 },
+        "spot_00000003": { name:"日田豆田町 老街",              type:"attraction", time:"12:30", note:"江戸時代街景散步", cost:0,     lat:33.3215, lng:130.9410 },
+        "spot_00000004": { name:"日田まぶし 千屋（鰻魚飯）",    type:"meal",       time:"13:00", note:"日田名物 まぶし三吃法", cost:12000, lat:33.3221, lng:130.9398 },
+        "spot_00000005": { name:"高速公路 過路費（日田→大分）", type:"toll",       time:"15:30", note:"九州自動車道",     cost:2500,  lat:33.2382, lng:131.6080, avoidToll:false },
+        "spot_00000006": { name:"大分 溫泉旅館 Check-in",       type:"hotel",      time:"17:00", note:"一泊二食",          cost:48000, lat:33.2382, lng:131.6080 }
+      }
+    },
+    "day_02_20261002": {
+      date: "2026-10-02",
+      spots: {
+        "spot_00000001": { name:"別府纜車（鶴見岳）",           type:"ticket",     time:"09:30", note:"來回纜車、山頂展望", cost:6000, lat:33.2820, lng:131.4515 },
+        "spot_00000002": { name:"由布院 湯之坪街道",            type:"shopping",   time:"12:00", note:"溫泉小鎮散策、和菓子",  cost:5000, lat:33.2640, lng:131.3590 },
+        "spot_00000003": { name:"由布院 金賞コロッケ",          type:"snack",      time:"12:30", note:"必吃可樂餅",         cost:1000, lat:33.2645, lng:131.3585 },
+        "spot_00000004": { name:"金鱗湖",                       type:"scenery",    time:"14:30", note:"由布院象徵 倒影湖", cost:0,    lat:33.2655, lng:131.3680 },
+        "spot_00000005": { name:"由布院 溫泉旅館 Check-in",     type:"hotel",      time:"16:00", note:"一泊二食",          cost:54000, lat:33.2660, lng:131.3650 }
+      }
+    },
+    "day_03_20261003": {
+      date: "2026-10-03",
+      spots: {
+        "spot_00000001": { name:"九州自然動物園 (African Safari)", type:"ticket",   time:"10:00", note:"叢林巴士行程含門票",  cost:14000, lat:33.3135, lng:131.4350 },
+        "spot_00000002": { name:"園區內 午餐",                  type:"meal",       time:"12:30", note:"咖哩 / 烏龍麵",      cost:4500,  lat:33.3135, lng:131.4350 },
+        "spot_00000003": { name:"別府 海地獄",                  type:"ticket",     time:"14:30", note:"鈷藍色溫泉",         cost:1600,  lat:33.2850, lng:131.4928 },
+        "spot_00000004": { name:"別府 灶地獄",                  type:"ticket",     time:"15:30", note:"足湯 + 溫泉蛋",      cost:1600,  lat:33.2845, lng:131.4960 },
+        "spot_00000005": { name:"別府溫泉旅館（晚餐）",          type:"hotel",      time:"18:00", note:"返回旅館晚餐",       cost:0,     lat:33.2660, lng:131.3650 }
+      }
+    },
+    "day_04_20261004": {
+      date: "2026-10-04",
+      spots: {
+        "spot_00000001": { name:"柳川 川下り（遊船）",          type:"activity",   time:"10:00", note:"水郷遊船 70 分鐘",   cost:7200, lat:33.1640, lng:130.4060 },
+        "spot_00000002": { name:"柳川 元祖本吉屋（鰻魚せいろ蒸し）", type:"meal",   time:"12:00", note:"柳川名物 蒸籠鰻飯",  cost:14000, lat:33.1635, lng:130.4070 },
+        "spot_00000003": { name:"太宰府天滿宮",                 type:"attraction", time:"14:30", note:"學問之神、求籤",     cost:0,    lat:33.5215, lng:130.5350 },
+        "spot_00000004": { name:"梅ヶ枝餅",                     type:"snack",      time:"15:00", note:"參道必吃烤麻糬",     cost:1500, lat:33.5215, lng:130.5345 },
+        "spot_00000005": { name:"隈研吾 星巴克 太宰府表參道店",  type:"meal",       time:"15:30", note:"建築景點咖啡",       cost:2500, lat:33.5202, lng:130.5340 },
+        "spot_00000006": { name:"福岡 平和苑 燒肉",             type:"meal",       time:"19:00", note:"和牛燒肉晚餐",       cost:18000, lat:33.5870, lng:130.4017 },
+        "spot_00000007": { name:"福岡市區 飯店 Check-in",       type:"hotel",      time:"21:00", note:"博多 / 天神附近",   cost:24000, lat:33.5902, lng:130.4017 }
+      }
+    },
+    "day_05_20261005": {
+      date: "2026-10-05",
+      spots: {
+        "spot_00000001": { name:"麵包超人博物館（博多）",        type:"ticket",     time:"10:00", note:"親子景點 含商品區",  cost:8000, lat:33.5905, lng:130.4138 },
+        "spot_00000002": { name:"博多運河城 拉麵球場",           type:"meal",       time:"12:30", note:"博多豚骨拉麵",       cost:5000, lat:33.5897, lng:130.4112 },
+        "spot_00000003": { name:"天神地下街 / PARCO",            type:"shopping",   time:"14:30", note:"伴手禮、流行服飾",   cost:15000, lat:33.5910, lng:130.3990 },
+        "spot_00000004": { name:"中洲屋台街 晚餐",              type:"meal",       time:"19:00", note:"屋台拉麵 / 天婦羅",  cost:8000, lat:33.5930, lng:130.4060 },
+        "spot_00000005": { name:"福岡市區 飯店",                type:"hotel",      time:"21:30", note:"原飯店續住",         cost:24000, lat:33.5902, lng:130.4017 }
+      }
+    },
+    "day_06_20261006": {
+      date: "2026-10-06",
+      spots: {
+        "spot_00000001": { name:"加油（還車前）",               type:"gas",        time:"09:00", note:"還車要求滿油",       cost:3500, lat:33.5870, lng:130.4490 },
+        "spot_00000002": { name:"福岡機場 還車",                type:"transport",  time:"09:30", note:"租車還車",           cost:0,    lat:33.5870, lng:130.4490 },
+        "spot_00000003": { name:"福岡機場 國際線 免稅店",        type:"shopping",   time:"11:00", note:"白色戀人、明太子",   cost:8000, lat:33.5859, lng:130.4509 },
+        "spot_00000004": { name:"返台班機 起飛",                type:"transport",  time:"13:30", note:"飛回桃園",           cost:0,    lat:33.5859, lng:130.4509 }
+      }
+    }
+  }
+};
+
+function showState(id) {
+  ['state-loading','state-login','state-not-admin','state-ready'].forEach(s => {
+    document.getElementById(s).classList.add('hidden');
+  });
+  document.getElementById(id).classList.remove('hidden');
+}
+
+let currentUser = null;
+
+onAuthStateChanged(auth, async user => {
+  if (!user) { showState('state-login'); return; }
+  currentUser = user;
+
+  let isAdmin = user.email === ADMIN_EMAIL;
+  if (!isAdmin) {
+    try {
+      const snap = await get(ref(db, `users/${user.uid}`));
+      isAdmin = snap.val()?.isAdmin === true;
+    } catch(e) {}
+  }
+
+  if (!isAdmin) {
+    document.getElementById('not-admin-email').innerHTML =
+      `登入帳號：<code style="color:#f78166">${user.email}</code><br>請改用管理員帳號。`;
+    showState('state-not-admin');
+    return;
+  }
+
+  document.getElementById('user-name').textContent  = user.displayName || '管理員';
+  document.getElementById('user-email').textContent = user.email || '';
+  document.getElementById('user-photo').src         = user.photoURL || '';
+  showState('state-ready');
+});
+
+window.loginWithGoogle = async function() {
+  const provider = new GoogleAuthProvider();
+  try {
+    // 先試彈窗（最常見的流程）
+    await signInWithPopup(auth, provider);
+  } catch(e) {
+    console.warn('Popup failed:', e.code);
+    // 彈窗失敗時 fallback 到 redirect
+    if (e.code === 'auth/popup-blocked' || e.code === 'auth/popup-closed-by-user' || e.code === 'auth/operation-not-supported-in-this-environment') {
+      try {
+        await signInWithRedirect(auth, provider);
+      } catch(e2) {
+        alert('登入失敗：' + e2.message);
+      }
+    } else {
+      alert('登入失敗：' + e.message);
+    }
+  }
+};
+
+window.logout = async function() { await signOut(auth); };
+
+const log = document.getElementById('log');
+function logLine(msg, cls='info') {
+  log.classList.add('show');
+  const span = document.createElement('span');
+  span.className = cls;
+  span.textContent = msg + '\n';
+  log.appendChild(span);
+  log.scrollTop = log.scrollHeight;
+}
+
+window.runImport = async function() {
+  const btn = document.getElementById('btn-import');
+  btn.disabled = true;
+  btn.textContent = '⏳ 匯入中...';
+  log.innerHTML = '';
+
+  try {
+    logLine('▶ 已登入：' + currentUser.email, 'info');
+    logLine('', 'info');
+
+    // Step 1: projects/main
+    logLine('━━ 步驟 1：建立旅遊專案 ━━', 'step');
+    const projectData = {
+      title: TRIP.title,
+      description: "家庭旅遊 — 九州福岡 6 天行程",
+      startDate: "2026-10-01",
+      endDate:   "2026-10-06",
+      emoji: "✈️",
+      color: "#4a7c59",
+      ownerId:   currentUser.uid,
+      ownerName: currentUser.displayName || "管理員",
+      memberCount: 1,
+      members: {
+        [currentUser.uid]: {
+          status: "approved",
+          role: "owner",
+          name: currentUser.displayName || "管理員"
+        }
+      },
+      createdAt: Date.now()
+    };
+    await set(ref(db, `projects/${PROJECT_ID}`), projectData);
+    logLine('✅ projects/main 建立完成', 'ok');
+    logLine('', 'info');
+
+    // Step 2: trips/main
+    logLine('━━ 步驟 2：寫入行程內容 ━━', 'step');
+    let dayCount = 0, spotCount = 0;
+    Object.values(TRIP.days).forEach(d => {
+      dayCount++;
+      spotCount += Object.keys(d.spots || {}).length;
+    });
+    logLine(`▶ ${dayCount} 天 / ${spotCount} 景點 / 預算 ¥${TRIP.budget.toLocaleString()}`, 'info');
+    await set(ref(db, `trips/${PROJECT_ID}`), TRIP);
+    logLine('✅ trips/main 寫入完成', 'ok');
+    logLine('', 'info');
+
+    logLine('🎉 全部匯入完成！', 'ok');
+    logLine('', 'info');
+    logLine('請回到 index.html 查看卡片', 'info');
+
+    btn.textContent = '✅ 匯入完成（可關閉視窗）';
+    btn.style.background = 'linear-gradient(135deg,#39d353,#16a085)';
+  } catch (err) {
+    logLine('❌ 匯入失敗：' + err.message, 'err');
+    if (err.code === 'PERMISSION_DENIED') {
+      logLine('權限被拒，請確認登入帳號為管理員。', 'info');
+    }
+    btn.disabled = false;
+    btn.textContent = '🔄 重試匯入';
+  }
+};
+</script>
+</body>
+</html>
