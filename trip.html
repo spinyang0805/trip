@@ -375,7 +375,9 @@ function kickMapResize() {
     el.style.width = 'calc(100% - 1px)';
     setTimeout(() => { el.style.width = ''; }, 120);
   };
-  [600, 2200, 5000].forEach(t => setTimeout(nudge, t));
+  // the stalled tile RPC only responds to a nudge after it gives up
+  // (~10s), so keep nudging periodically for the first 20 seconds
+  [1500, 4000, 7000, 10000, 14000, 18000].forEach(t => setTimeout(nudge, t));
 }
 
 function clearMap() {
