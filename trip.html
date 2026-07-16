@@ -531,23 +531,41 @@ window.openNavigation = function() {
 };
 
 // ── GEOCODE ───────────────────────────────────
-function geocodeAndSave(dayId, spotId, name, retried) {
+function saveSpotLocation(dayId, spotId, name, lat, lng, placeId) {
+  if (!tripData.days[dayId]?.spots?.[spotId]) return;
+  tripData.days[dayId].spots[spotId].lat = lat;
+  tripData.days[dayId].spots[spotId].lng = lng;
+  if (placeId) tripData.days[dayId].spots[spotId].placeId = placeId;
+  save();
+  if (activeDay === dayId) showDayOnMap(dayId);
+  showToast(`已定位「${name}」📍`);
+}
+
+// Business/POI names resolve much better via Places search than the
+// address-oriented Geocoder, so try Places first and fall back.
+function geocodeAndSave(dayId, spotId, name) {
   if (!window.google || !map) {
     showToast('地圖尚未載入，請稍後再試 🗺');
     return;
   }
-  new google.maps.Geocoder().geocode({ address: name, region: 'jp' }, (results, status) => {
+  const svc = new google.maps.places.PlacesService(map);
+  svc.findPlaceFromQuery({ query: name, fields: ['name','geometry','place_id'] }, (results, status) => {
+    const p = results?.[0];
+    if (status === google.maps.places.PlacesServiceStatus.OK && p?.geometry) {
+      saveSpotLocation(dayId, spotId, name, p.geometry.location.lat(), p.geometry.location.lng(), p.place_id);
+    } else {
+      geocodeFallback(dayId, spotId, name, false);
+    }
+  });
+}
+
+function geocodeFallback(dayId, spotId, name, retried) {
+  new google.maps.Geocoder().geocode({ address: retried ? name + ' 日本' : name, region: 'jp' }, (results, status) => {
     if (status === 'OK' && results[0]) {
       const loc = results[0].geometry.location;
-      if (tripData.days[dayId]?.spots?.[spotId]) {
-        tripData.days[dayId].spots[spotId].lat = loc.lat();
-        tripData.days[dayId].spots[spotId].lng = loc.lng();
-        save();
-        if (activeDay === dayId) showDayOnMap(dayId);
-        showToast(`已定位「${name}」📍`);
-      }
+      saveSpotLocation(dayId, spotId, name, loc.lat(), loc.lng(), null);
     } else if (status === 'ZERO_RESULTS' && !retried) {
-      geocodeAndSave(dayId, spotId, name + ' 日本', true);
+      geocodeFallback(dayId, spotId, name, true);
     } else {
       showToast(`找不到「${name}」的位置，請換個名稱試試`);
       console.warn('Geocode failed:', name, status);
