@@ -882,17 +882,23 @@ window.openPoiDetail = async function(dayId, spotId) {
   let poiId = sp.poiId;
   if (!poiId) {
     // promote this spot into the shared POI library
-    const poiRef = push(ref(db, 'pois'));
-    poiId = poiRef.key;
-    await set(poiRef, {
-      name: sp.name || '未命名景點',
-      placeId: sp.placeId || null,
-      lat: sp.lat || null, lng: sp.lng || null,
-      category: sp.type || 'attraction',
-      article: '', links: [],
-      createdBy: currentUser.uid, updatedBy: currentUser.uid,
-      updatedAt: Date.now(), usedByCount: 1
-    });
+    try {
+      const poiRef = push(ref(db, 'pois'));
+      poiId = poiRef.key;
+      await set(poiRef, {
+        name: sp.name || '未命名景點',
+        placeId: sp.placeId || null,
+        lat: sp.lat || null, lng: sp.lng || null,
+        category: sp.type || 'attraction',
+        article: '', links: [],
+        createdBy: currentUser.uid, updatedBy: currentUser.uid,
+        updatedAt: Date.now(), usedByCount: 1
+      });
+    } catch (e) {
+      console.error(e);
+      showToast('景點庫寫入被拒：請先在 Firebase 發布最新資料庫規則');
+      return;
+    }
     tripData.days[dayId].spots[spotId].poiId = poiId;
     save();
   }
