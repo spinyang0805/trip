@@ -36,15 +36,21 @@ let currentUserData = null;
 // ── Auth state ──────────────────────────────
 onAuthStateChanged(auth, async user => {
   if (user) {
-    currentUser = user;
-    await ensureUserRecord(user);
-    const snap = await get(ref(db, `users/${user.uid}`));
-    currentUserData = snap.val();
-    if (currentUserData?.status === 'approved' || currentUserData?.isAdmin) {
-      showApp();
-    } else if (currentUserData?.status === 'pending') {
-      showPending();
-    } else {
+    try {
+      currentUser = user;
+      await ensureUserRecord(user);
+      const snap = await get(ref(db, `users/${user.uid}`));
+      currentUserData = snap.val();
+      if (currentUserData?.status === 'approved' || currentUserData?.isAdmin) {
+        showApp();
+      } else if (currentUserData?.status === 'pending') {
+        showPending();
+      } else {
+        showLogin();
+      }
+    } catch (e) {
+      console.error('login flow failed:', e);
+      alert('登入流程發生錯誤：' + (e.message || e) + '\n請截圖回報管理員');
       showLogin();
     }
   } else {
@@ -75,7 +81,12 @@ window.loginWithGoogle = async () => {
   try {
     const provider = new GoogleAuthProvider();
     await signInWithPopup(auth, provider);
-  } catch(e) { console.error(e); }
+  } catch(e) {
+    console.error(e);
+    if (e.code !== 'auth/popup-closed-by-user' && e.code !== 'auth/cancelled-popup-request') {
+      alert('Google 登入失敗：' + (e.code || e.message) + '\n請截圖回報管理員');
+    }
+  }
 };
 
 window.logout = async () => {
