@@ -45,6 +45,40 @@ const projectId = urlParams.get('project') || 'main';
 let currentUser = null;
 let currentUd   = null;
 let projectMeta = null;
+
+// ── CURRENCY (project-scoped; managed in expenses.html) ─
+const CURRENCY_SYMBOLS = {
+  JPY:'¥', TWD:'NT$', USD:'$', EUR:'€', KRW:'₩', CNY:'¥', HKD:'HK$',
+  THB:'฿', VND:'₫', GBP:'£', AUD:'A$', SGD:'S$'
+};
+function symbolFor(code) { return CURRENCY_SYMBOLS[code] || (code + ' '); }
+let baseCurrency = 'JPY';
+let currencyRates = {};
+
+function convert(amount, from, to) {
+  if (from === to) return amount;
+  const rf = currencyRates[from]?.rateToTWD, rt = currencyRates[to]?.rateToTWD;
+  if (!rf || !rt) return null;
+  return amount * rf / rt;
+}
+function toBase(amount, currency) {
+  if (!currency || currency === baseCurrency) return amount;
+  const v = convert(amount, currency, baseCurrency);
+  return v === null ? amount : v;
+}
+
+function loadCurrencySettings() {
+  onValue(ref(db, `projects/${projectId}/baseCurrency`), snap => {
+    baseCurrency = snap.val() || 'JPY';
+    updateBudgetBar();
+    if (tripLoaded) renderAll();
+  });
+  onValue(ref(db, `projects/${projectId}/currencyRates`), snap => {
+    currencyRates = snap.val() || {};
+    updateBudgetBar();
+    if (tripLoaded) renderAll();
+  });
+}
 let tripData    = { title: '', budget: 0, days: {} };
 let map, directionsService;
 let renderers   = {}; // dayId -> DirectionsRenderer[]  (one per spot-pair)
@@ -73,6 +107,7 @@ onAuthStateChanged(auth, async user => {
   if (ud.isAdmin || projectMeta?.ownerId === user.uid) {
     document.getElementById('btn-members').style.display = '';
   }
+  loadCurrencySettings();
   loadTrip();
   loadPhotos();
 });
@@ -121,7 +156,7 @@ function renderAll() {
     const day   = tripData.days[dayId];
     const spots = getSpotsArray(day);
     const color = DAY_COLORS[idx % DAY_COLORS.length];
-    const totalCost = spots.reduce((s, sp) => s + (parseFloat(sp.cost)||0), 0);
+    const totalCost = spots.reduce((s, sp) => s + toBase(parseFloat(sp.cost)||0, sp.costCurrency||baseCurrency), 0);
     const collapsed = !!collapsedDays[dayId];
     const summary = spots.length
       ? `${spots.length} 個景點${spots[0]?.name ? '｜' + esc(spots[0].name) + (spots.length > 1 ? ' → ' + esc(spots[spots.length-1].name) : '') : ''}`
@@ -135,7 +170,7 @@ function renderAll() {
           <input class="day-date" type="date" value="${day.date||''}" onchange="updateDayDate('${dayId}',this.value)">
         </div>
         <div class="day-hd-right">
-          <span class="day-cost" style="color:${color}">¥${totalCost.toLocaleString()}</span>
+          <span class="day-cost" style="color:${color}">${symbolFor(baseCurrency)}${Math.round(totalCost).toLocaleString()}</span>
           <button class="btn-ic" title="照片" onclick="openPhotos('${dayId}')">📸</button>
           <button class="btn-map-day" style="background:${color}" onclick="showDayOnMap('${dayId}')">🗺 地圖</button>
           <button class="btn-ic" onclick="focusAdd('${dayId}')">＋</button>
@@ -227,7 +262,9 @@ function renderSpot(dayId, sp, i, dayColor, total) {
         <span class="spot-cost-wrap">
           <input class="spot-cost" type="number" value="${sp.cost||''}" placeholder="費用"
             onchange="updateSpot('${dayId}','${sp.id}','cost',this.value)">
-          <span class="yen">円</span>
+          <select class="spot-cur-sel" onchange="updateSpot('${dayId}','${sp.id}','costCurrency',this.value)">
+            ${Object.keys(CURRENCY_SYMBOLS).map(c => `<option value="${c}" ${(sp.costCurrency||baseCurrency)===c?'selected':''}>${c}</option>`).join('')}
+          </select>
         </span>
       </div>
       ${sp.type === 'toll' ? `
@@ -698,7 +735,7 @@ window.updateSpot = function(dayId, spotId, field, value) {
   if (!tripData.days[dayId]?.spots?.[spotId]) return;
   tripData.days[dayId].spots[spotId][field] = field === 'cost' ? (parseFloat(value)||0) : value;
   save();
-  if (field === 'cost' || field === 'type') updateBudgetBar();
+  if (field === 'cost' || field === 'costCurrency' || field === 'type') updateBudgetBar();
 };
 
 window.deleteSpot = function(dayId, spotId) {
@@ -782,15 +819,20 @@ window.toggleAllDays = function() {
 function updateBudgetBar() {
   let spent = 0;
   if (tripData.days) Object.values(tripData.days).forEach(d => {
-    if (d.spots) Object.values(d.spots).forEach(s => { spent += parseFloat(s.cost)||0; });
+    if (d.spots) Object.values(d.spots).forEach(s => {
+      spent += toBase(parseFloat(s.cost)||0, s.costCurrency||baseCurrency);
+    });
   });
   const budget = parseFloat(tripData.budget) || 0;
   const remain = budget - spent;
   const pct    = budget > 0 ? Math.min(spent / budget * 100, 100) : 0;
+  const sym = symbolFor(baseCurrency);
 
-  document.getElementById('spent-val').textContent  = `¥${Math.round(spent).toLocaleString()}`;
-  document.getElementById('budget-val').textContent = `¥${Math.round(budget).toLocaleString()}`;
-  document.getElementById('remain-val').textContent = `¥${Math.abs(Math.round(remain)).toLocaleString()}`;
+  const budgetLbl = document.getElementById('budget-cur-lbl');
+  if (budgetLbl) budgetLbl.textContent = baseCurrency;
+  document.getElementById('spent-val').textContent  = `${sym}${Math.round(spent).toLocaleString()}`;
+  document.getElementById('budget-val').textContent = `${sym}${Math.round(budget).toLocaleString()}`;
+  document.getElementById('remain-val').textContent = `${sym}${Math.abs(Math.round(remain)).toLocaleString()}`;
   document.getElementById('remain-lbl').textContent = remain >= 0 ? '剩餘' : '超支';
   document.getElementById('remain-val').style.color = remain >= 0 ? '#39d353' : '#f85149';
   document.getElementById('budget-bar-fill').style.width = pct + '%';
@@ -1328,6 +1370,9 @@ nav {
 .spot-cost-wrap { display:flex; align-items:center; gap:2px; }
 .spot-cost { background:transparent; border:none; border-bottom:1px dashed var(--gold); color:var(--gold); font-size:.68rem; width:52px; text-align:right; outline:none; font-family:inherit; }
 .yen { font-size:.62rem; color:var(--gold); }
+.spot-cur-sel { background:var(--surface2); border:1px solid var(--border); border-radius:4px; color:var(--gold); font-size:.6rem; padding:1px 2px; outline:none; font-family:inherit; }
+.btn-currency-link { background:transparent; border:none; cursor:pointer; font-size:.85rem; padding:0 2px; opacity:.75; }
+.btn-currency-link:hover { opacity:1; }
 .toggle-label { font-size:.68rem; color:var(--muted); display:flex; align-items:center; gap:4px; cursor:pointer; }
 .spot-warn { background:rgba(248,81,73,.15); color:#f85149; border:1px solid rgba(248,81,73,.3); border-radius:5px; padding:2px 7px; font-size:.65rem; cursor:help; white-space:nowrap; }
 
@@ -1508,7 +1553,8 @@ body.no-select { user-select:none; -webkit-user-select:none; }
 <div class="budget-strip">
   <div class="budget-field">
     💴 預算
-    <input type="number" id="budget-total" placeholder="0" oninput="saveMeta()"> 日圓
+    <input type="number" id="budget-total" placeholder="0" oninput="saveMeta()"> <span id="budget-cur-lbl">JPY</span>
+    <button class="btn-currency-link" onclick="location.href='expenses.html?project='+(new URLSearchParams(location.search).get('project')||'main')+'&tab=currency'" title="幣別設定（本專案專屬，不影響其他專案）">💱</button>
   </div>
   <div class="budget-nums">
     <div class="budget-num">
