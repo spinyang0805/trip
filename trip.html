@@ -70,6 +70,9 @@ onAuthStateChanged(auth, async user => {
   if (!isMember) { location.href = 'index.html'; return; }
   currentUd = ud;
   document.getElementById('user-name').textContent = ud.name || '';
+  if (ud.isAdmin || projectMeta?.ownerId === user.uid) {
+    document.getElementById('btn-members').style.display = '';
+  }
   loadTrip();
   loadPhotos();
 });
@@ -1048,6 +1051,62 @@ window.switchPanel = function(which) {
   if (which === 'map') kickMapResize();
 };
 
+// ── PROJECT MEMBERS ───────────────────────────
+window.openMembers = async function() {
+  let users = {};
+  try {
+    const snap = await get(ref(db, 'users'));
+    users = snap.val() || {};
+  } catch (e) {
+    showToast('讀取使用者清單失敗（需要管理員權限）');
+    return;
+  }
+  const projSnap = await get(ref(db, `projects/${projectId}`));
+  projectMeta = projSnap.val() || {};
+  const members = projectMeta.members || {};
+  const rows = Object.entries(users)
+    .filter(([, u]) => u.status === 'approved' || u.isAdmin)
+    .map(([uid, u]) => {
+      const isOwner = projectMeta.ownerId === uid;
+      const inProj = isOwner || members[uid]?.status === 'approved';
+      return `<label class="member-row">
+        <input type="checkbox" ${inProj ? 'checked' : ''} ${isOwner ? 'disabled' : ''}
+          onchange="toggleMember('${uid}', this.checked)">
+        <img class="member-photo" src="${u.photo || ''}" onerror="this.style.display='none'">
+        <span class="member-name">${esc(u.name || u.email || uid)}</span>
+        <span class="member-tag">${isOwner ? '建立者' : (u.isAdmin ? '管理員' : '')}</span>
+      </label>`;
+    });
+  document.getElementById('members-list').innerHTML = rows.join('');
+  document.getElementById('members-empty').style.display = rows.length > 1 ? 'none' : 'block';
+  document.getElementById('members-modal-mask').classList.add('open');
+};
+
+window.closeMembers = function() {
+  document.getElementById('members-modal-mask').classList.remove('open');
+};
+
+window.toggleMember = async function(uid, add) {
+  try {
+    const uSnap = await get(ref(db, `users/${uid}`));
+    const u = uSnap.val() || {};
+    if (add) {
+      await set(ref(db, `projects/${projectId}/members/${uid}`),
+        { status: 'approved', role: 'member', name: u.name || u.email || '' });
+      showToast(`已加入成員：${u.name || ''} ✓`);
+    } else {
+      await remove(ref(db, `projects/${projectId}/members/${uid}`));
+      showToast(`已移除成員：${u.name || ''}`);
+    }
+    const mSnap = await get(ref(db, `projects/${projectId}/members`));
+    const count = Object.keys(mSnap.val() || {}).length;
+    await update(ref(db, `projects/${projectId}`), { memberCount: count });
+  } catch (e) {
+    console.error(e);
+    showToast('成員更新失敗：' + (e.message || e));
+  }
+};
+
 // ── SHARE ─────────────────────────────────────
 window.copyShare = function() {
   navigator.clipboard.writeText(window.location.href).then(() => showToast('連結已複製 🎉'));
@@ -1305,6 +1364,14 @@ body.no-select { user-select:none; -webkit-user-select:none; }
 .pm-hint { font-size:.65rem; color:var(--muted); }
 .pm-empty { text-align:center; color:var(--muted); font-size:.75rem; padding:30px 0; }
 
+/* ── MEMBERS ── */
+.member-row { display:flex; align-items:center; gap:10px; padding:9px 4px; border-bottom:1px solid rgba(255,255,255,.05); cursor:pointer; }
+.member-row:last-child { border-bottom:none; }
+.member-row input { accent-color:var(--accent); width:16px; height:16px; }
+.member-photo { width:30px; height:30px; border-radius:50%; }
+.member-name { flex:1; font-size:.85rem; }
+.member-tag { font-size:.62rem; color:var(--gold); }
+
 /* ── LIGHTBOX ── */
 #lightbox { position:fixed; inset:0; background:rgba(0,0,0,.9); z-index:600; display:none; align-items:center; justify-content:center; cursor:zoom-out; }
 #lightbox.open { display:flex; }
@@ -1405,6 +1472,7 @@ body.no-select { user-select:none; -webkit-user-select:none; }
       <button class="btn-add-day" onclick="addDay()">＋ 新增天數</button>
       <button class="btn-share" onclick="toggleAllDays()">⬍ 展開/收合</button>
       <button class="btn-share" onclick="location.href='poi.html?project='+(new URLSearchParams(location.search).get('project')||'main')">📁 文件</button>
+      <button class="btn-share" id="btn-members" style="display:none" onclick="openMembers()">👥 成員</button>
       <button class="btn-share" onclick="copyShare()">🔗 複製分享連結</button>
     </div>
     <div id="days-container">
@@ -1452,6 +1520,23 @@ body.no-select { user-select:none; -webkit-user-select:none; }
       <input type="file" id="pm-file" accept="image/*" multiple style="display:none" onchange="uploadPhotos(this.files)">
       <button class="pm-upload-btn" onclick="document.getElementById('pm-file').click()">⬆ 上傳照片</button>
       <span class="pm-hint" id="pm-hint">自動壓縮後上傳</span>
+    </div>
+  </div>
+</div>
+
+<!-- MEMBERS MODAL -->
+<div class="modal-mask" id="members-modal-mask" onclick="if(event.target===this)closeMembers()">
+  <div class="photo-modal" style="width:460px">
+    <div class="pm-head">
+      <span class="pm-title">👥 專案成員</span>
+      <button class="pm-close" onclick="closeMembers()">✕</button>
+    </div>
+    <div class="pm-body">
+      <div id="members-list"></div>
+      <div class="pm-empty" id="members-empty" style="display:none">沒有其他已批准的使用者<br>請先在後台批准帳號</div>
+    </div>
+    <div class="pm-foot">
+      <span class="pm-hint">勾選 = 加入本專案。新成員需先在後台管理批准帳號。</span>
     </div>
   </div>
 </div>
