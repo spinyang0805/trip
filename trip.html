@@ -375,10 +375,16 @@ function kickMapResize() {
   const kick = () => {
     if (tilesLoaded || !map || attempts >= 6) return;
     attempts++;
-    const c = map.getCenter();
-    google.maps.event.trigger(map, 'resize');
-    if (c) map.setCenter(c);
-    setTimeout(kick, 500 * attempts);
+    // an actual container size change is the only reliable wake-up:
+    // the modern Maps API ignores the legacy 'resize' trigger
+    const el = document.getElementById('map');
+    el.style.width = 'calc(100% - 1px)';
+    setTimeout(() => {
+      el.style.width = '';
+      const c = map.getCenter();
+      if (c) map.setCenter(c);
+    }, 80);
+    setTimeout(kick, 600 * attempts);
   };
   setTimeout(kick, 300);
 }
