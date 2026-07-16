@@ -38,6 +38,14 @@ onAuthStateChanged(auth, async user => {
   const snap = await get(ref(db, `users/${user.uid}`));
   const ud = snap.val();
   if (!ud || (ud.status !== 'approved' && !ud.isAdmin)) { location.href = 'index.html'; return; }
+  const projSnap = await get(ref(db, `projects/${projectId}`));
+  const proj = projSnap.val();
+  const isMember = proj && (
+    ud.isAdmin ||
+    proj.ownerId === user.uid ||
+    proj.members?.[user.uid]?.status === 'approved'
+  );
+  if (!isMember) { location.href = 'index.html'; return; }
   loadProject();
   loadMembers();
   loadExpenses();

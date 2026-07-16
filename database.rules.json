@@ -1,0 +1,37 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+
+    "users": {
+      ".read": "auth != null && root.child('users').child(auth.uid).child('isAdmin').val() === true",
+      ".write": "auth != null && root.child('users').child(auth.uid).child('isAdmin').val() === true",
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        ".write": "auth != null && auth.uid === $uid",
+        ".validate": "root.child('users').child(auth.uid).child('isAdmin').val() === true || auth.token.email === 'a45436@gmail.com' || (newData.child('isAdmin').val() !== true && newData.child('status').val() === 'pending')"
+      }
+    },
+
+    "projects": {
+      ".read": "auth != null && (root.child('users').child(auth.uid).child('status').val() === 'approved' || root.child('users').child(auth.uid).child('isAdmin').val() === true)",
+      "$pid": {
+        ".write": "auth != null && (root.child('users').child(auth.uid).child('isAdmin').val() === true || data.child('ownerId').val() === auth.uid || data.child('members').child(auth.uid).child('status').val() === 'approved' || (!data.exists() && root.child('users').child(auth.uid).child('status').val() === 'approved'))"
+      }
+    },
+
+    "trips": {
+      "$pid": {
+        ".read": "auth != null && (root.child('users').child(auth.uid).child('isAdmin').val() === true || root.child('projects').child($pid).child('ownerId').val() === auth.uid || root.child('projects').child($pid).child('members').child(auth.uid).child('status').val() === 'approved')",
+        ".write": "auth != null && (root.child('users').child(auth.uid).child('isAdmin').val() === true || root.child('projects').child($pid).child('ownerId').val() === auth.uid || root.child('projects').child($pid).child('members').child(auth.uid).child('status').val() === 'approved')"
+      }
+    },
+
+    "expenses": {
+      "$pid": {
+        ".read": "auth != null && (root.child('users').child(auth.uid).child('isAdmin').val() === true || root.child('projects').child($pid).child('ownerId').val() === auth.uid || root.child('projects').child($pid).child('members').child(auth.uid).child('status').val() === 'approved')",
+        ".write": "auth != null && (root.child('users').child(auth.uid).child('isAdmin').val() === true || root.child('projects').child($pid).child('ownerId').val() === auth.uid || root.child('projects').child($pid).child('members').child(auth.uid).child('status').val() === 'approved')"
+      }
+    }
+  }
+}

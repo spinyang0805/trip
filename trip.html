@@ -26,13 +26,13 @@ const app  = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db   = getDatabase(app);
 
-const LINE_NOTIFY_TOKEN = "b720eacc97320189c93bc6e7880cdf70";
 const ADMIN_EMAIL = "a45436@gmail.com";
 
 const urlParams = new URLSearchParams(location.search);
 const projectId = urlParams.get('project') || 'main';
 
 let currentUser = null;
+let projectMeta = null;
 let tripData    = { title: '', budget: 0, days: {} };
 let map, directionsService;
 let renderers   = {}; // dayId -> DirectionsRenderer[]  (one per spot-pair)
@@ -48,6 +48,14 @@ onAuthStateChanged(auth, async user => {
   const snap = await get(ref(db, `users/${user.uid}`));
   const ud = snap.val();
   if (!ud || (ud.status !== 'approved' && !ud.isAdmin)) { location.href = 'index.html'; return; }
+  const projSnap = await get(ref(db, `projects/${projectId}`));
+  projectMeta = projSnap.val();
+  const isMember = projectMeta && (
+    ud.isAdmin ||
+    projectMeta.ownerId === user.uid ||
+    projectMeta.members?.[user.uid]?.status === 'approved'
+  );
+  if (!isMember) { location.href = 'index.html'; return; }
   document.getElementById('user-name').textContent = ud.name || '';
   loadTrip();
 });
@@ -55,8 +63,8 @@ onAuthStateChanged(auth, async user => {
 // ── LOAD TRIP ─────────────────────────────────
 function loadTrip() {
   onValue(ref(db, `trips/${projectId}`), snap => {
-    tripData = snap.val() || { title: '九州福岡 2026 十月', budget: 0, days: {} };
-    document.getElementById('trip-title').value = tripData.title || '';
+    tripData = snap.val() || { title: projectMeta?.title || '', budget: 0, days: {} };
+    document.getElementById('trip-title').value = tripData.title || projectMeta?.title || '';
     document.getElementById('budget-total').value = tripData.budget || '';
     renderAll();
   });
@@ -70,6 +78,7 @@ function saveMeta() {
   tripData.title  = document.getElementById('trip-title').value;
   tripData.budget = parseFloat(document.getElementById('budget-total').value) || 0;
   save();
+  if (tripData.title) update(ref(db, `projects/${projectId}`), { title: tripData.title });
   updateBudgetBar();
 }
 window.saveMeta = saveMeta;
@@ -488,18 +497,6 @@ window.toggleMap = function() {
 // ── SHARE ─────────────────────────────────────
 window.copyShare = function() {
   navigator.clipboard.writeText(window.location.href).then(() => showToast('連結已複製 🎉'));
-};
-
-// ── LINE NOTIFY ────────────────────────────────
-window.sendLineNotify = async function(msg) {
-  // Line Notify requires a CORS proxy in browser environment
-  try {
-    await fetch('https://corsproxy.io/?' + encodeURIComponent('https://notify-api.line.me/api/notify'), {
-      method: 'POST',
-      headers: { 'Authorization': 'Bearer ' + LINE_NOTIFY_TOKEN, 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: 'message=' + encodeURIComponent(msg)
-    });
-  } catch(e) { console.warn('Line Notify:', e); }
 };
 
 // ── UTILS ─────────────────────────────────────

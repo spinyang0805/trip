@@ -182,6 +182,7 @@ window.createProject = async () => {
     members: { [currentUser.uid]: { status: 'approved', role: 'owner', name: currentUser.displayName } },
     createdAt: Date.now()
   });
+  await set(ref(db, `trips/${projRef.key}`), { title, budget: 0, days: {} });
 
   closeNewProjectModal();
   document.getElementById('np-title').value = '';
