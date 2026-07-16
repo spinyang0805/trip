@@ -4,6 +4,14 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>行程規劃｜TripMaster</title>
+<script>
+// Maps API callback stub: the real init lives in the module script below,
+// which may not have executed yet when the Maps script finishes loading.
+window.initMap = function() {
+  window.__mapsReady = true;
+  if (window.__onMapsReady) window.__onMapsReady();
+};
+</script>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700;900&family=Playfair+Display:ital,wght@0,700;1,400&display=swap" rel="stylesheet">
 
 <script type="module">
@@ -209,7 +217,7 @@ function renderMapTabs(dayKeys) {
 }
 
 // ── GOOGLE MAP ────────────────────────────────
-window.initMap = function() {
+function initMapReal() {
   document.getElementById('map-placeholder').style.display = 'none';
   map = new google.maps.Map(document.getElementById('map'), {
     center: { lat: 33.5902, lng: 130.4017 },
@@ -230,7 +238,9 @@ window.initMap = function() {
   });
   directionsService = new google.maps.DirectionsService();
   renderAll();
-};
+}
+window.__onMapsReady = initMapReal;
+if (window.__mapsReady) initMapReal();
 
 function clearMap() {
   allMarkers.forEach(m => m.setMap(null));
@@ -353,10 +363,12 @@ window.openNavigation = function() {
 };
 
 // ── GEOCODE ───────────────────────────────────
-function geocodeAndSave(dayId, spotId, name) {
-  if (!window.google || !map) return;
-  const query = name + ' 福岡 日本';
-  new google.maps.Geocoder().geocode({ address: query, region: 'jp' }, (results, status) => {
+function geocodeAndSave(dayId, spotId, name, retried) {
+  if (!window.google || !map) {
+    showToast('地圖尚未載入，請稍後再試 🗺');
+    return;
+  }
+  new google.maps.Geocoder().geocode({ address: name, region: 'jp' }, (results, status) => {
     if (status === 'OK' && results[0]) {
       const loc = results[0].geometry.location;
       if (tripData.days[dayId]?.spots?.[spotId]) {
@@ -364,7 +376,13 @@ function geocodeAndSave(dayId, spotId, name) {
         tripData.days[dayId].spots[spotId].lng = loc.lng();
         save();
         if (activeDay === dayId) showDayOnMap(dayId);
+        showToast(`已定位「${name}」📍`);
       }
+    } else if (status === 'ZERO_RESULTS' && !retried) {
+      geocodeAndSave(dayId, spotId, name + ' 日本', true);
+    } else {
+      showToast(`找不到「${name}」的位置，請換個名稱試試`);
+      console.warn('Geocode failed:', name, status);
     }
   });
 }
@@ -798,6 +816,6 @@ nav {
 <div class="toast" id="toast"></div>
 
 <!-- Google Maps -->
-<script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyC-QgKIKtZkmWIOXawmGBHVci4kKJOF7W0&callback=initMap&libraries=places,geometry" async defer></script>
+<script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyC-QgKIKtZkmWIOXawmGBHVci4kKJOF7W0&callback=initMap&libraries=places,geometry&loading=async" async defer></script>
 </body>
 </html>
