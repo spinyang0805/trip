@@ -108,6 +108,7 @@ function loadPoi() {
       document.getElementById('ws-google-link').href =
         'https://www.google.com/search?q=' + encodeURIComponent(poiData.name || '');
     }
+    renderOpeningHours();
     renderPoiPhotos();
     renderMiniMap();
   });
@@ -140,7 +141,7 @@ window.searchGooglePlace = function() {
     }
     service.getDetails({
       placeId: results[0].place_id,
-      fields: ['name', 'geometry', 'place_id', 'formatted_address', 'rating', 'user_ratings_total']
+      fields: ['name', 'geometry', 'place_id', 'formatted_address', 'rating', 'user_ratings_total', 'opening_hours']
     }, async (place, detStatus) => {
       if (detStatus !== google.maps.places.PlacesServiceStatus.OK || !place?.geometry) {
         showToast('Google 找不到此名稱');
@@ -148,7 +149,7 @@ window.searchGooglePlace = function() {
       }
       const lat = place.geometry.location.lat();
       const lng = place.geometry.location.lng();
-      await update(ref(db, `pois/${poiId}`), {
+      const patch = {
         lat, lng,
         address: place.formatted_address || '',
         placeId: place.place_id || null,
@@ -157,8 +158,20 @@ window.searchGooglePlace = function() {
         ratingUpdatedAt: Date.now(),
         updatedBy: currentUser.uid,
         updatedAt: Date.now()
-      });
-      showToast('已更新位置與評分 ⭐');
+      };
+      // periods use day 0=Sunday..6=Saturday, matching JS Date#getDay()
+      if (place.opening_hours?.periods?.length) {
+        patch.openingHours = {
+          periods: place.opening_hours.periods.map(p => ({
+            open: { day: p.open.day, time: p.open.time },
+            close: p.close ? { day: p.close.day, time: p.close.time } : null
+          })),
+          weekdayText: place.opening_hours.weekday_text || [],
+          updatedAt: Date.now()
+        };
+      }
+      await update(ref(db, `pois/${poiId}`), patch);
+      showToast('已更新位置、評分與營業時間 ⭐');
       if (miniMap) {
         miniMap.setCenter({ lat, lng });
         new google.maps.Marker({ position: { lat, lng }, map: miniMap });
@@ -189,6 +202,19 @@ window.onArticleInput = function(value) {
     document.getElementById('article-status').textContent = '已儲存 ✓';
   }, 1200);
 };
+
+// ── OPENING HOURS ──────────────────────────────
+function renderOpeningHours() {
+  const list = document.getElementById('poi-hours-list');
+  const texts = poiData?.openingHours?.weekdayText;
+  if (!texts || !texts.length) {
+    list.innerHTML = '';
+    document.getElementById('poi-hours-empty').style.display = 'block';
+    return;
+  }
+  document.getElementById('poi-hours-empty').style.display = 'none';
+  list.innerHTML = texts.map(line => `<div class="hours-row">${escHtml(line)}</div>`).join('');
+}
 
 // ── POI PHOTOS (public, shared) ───────────────
 function renderPoiPhotos() {
@@ -469,6 +495,10 @@ body.embed .wrap { padding:12px 12px; }
 .article-status { font-size:.65rem; color:var(--muted); text-align:right; margin-top:4px; }
 #mini-map { display:none; height:200px; border-radius:10px; margin-top:10px; }
 
+.hours-list { display:flex; flex-direction:column; gap:2px; }
+.hours-row { font-size:.78rem; color:var(--text); padding:3px 0; border-bottom:1px solid rgba(255,255,255,.04); }
+.hours-row:last-child { border-bottom:none; }
+
 .ph-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(110px,1fr)); gap:8px; }
 .ph-cell { position:relative; }
 .ph-cell img { width:100%; height:90px; object-fit:cover; border-radius:8px; cursor:pointer; display:block; }
@@ -564,6 +594,12 @@ body.embed .wrap { padding:12px 12px; }
         <textarea id="poi-links" rows="2" onchange="savePoiLinks(this.value)"></textarea>
       </div>
       <div id="mini-map"></div>
+    </div>
+
+    <div class="card">
+      <h2>🕐 營業時間<span style="font-weight:400;color:var(--muted);font-size:.7rem"> — 用上方「🔍」查詢自動帶入</span></h2>
+      <div id="poi-hours-list" class="hours-list"></div>
+      <div class="empty-hint" id="poi-hours-empty">尚無營業時間資料</div>
     </div>
 
     <div class="card">

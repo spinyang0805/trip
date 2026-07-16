@@ -78,11 +78,14 @@ onAuthStateChanged(auth, async user => {
 });
 
 // ── LOAD TRIP ─────────────────────────────────
+let tripLoaded = false;
+
 function loadTrip() {
   onValue(ref(db, `trips/${projectId}`), snap => {
     tripData = snap.val() || { title: projectMeta?.title || '', budget: 0, days: {} };
     document.getElementById('trip-title').value = tripData.title || projectMeta?.title || '';
     document.getElementById('budget-total').value = tripData.budget || '';
+    tripLoaded = true;
     renderAll();
   });
 }
@@ -188,6 +191,18 @@ function renderSpot(dayId, sp, i, dayColor, total) {
   const dayKeys = Object.keys(tripData.days || {}).sort();
   const moveOptions = dayKeys.filter(k => k !== dayId)
     .map(k => `<option value="${k}">移至 Day ${dayKeys.indexOf(k)+1}</option>`).join('');
+
+  let warnHtml = '';
+  const dayDate = tripData.days[dayId]?.date;
+  if (sp.poiId && dayDate && sp.time) {
+    const closed = isSpotClosed(sp.poiId, dayDate, sp.time);
+    if (closed === true) {
+      const dow = new Date(dayDate + 'T00:00:00').getDay();
+      const hoursTxt = hoursTextForDow(sp.poiId, dow);
+      warnHtml = `<span class="spot-warn" title="當日營業時間：${esc(hoursTxt)}">⚠️ 該時段可能未營業</span>`;
+    }
+  }
+
   return `
   <li class="spot-item" data-spot="${sp.id}" data-day="${dayId}">
     <div class="spot-left">
@@ -222,6 +237,7 @@ function renderSpot(dayId, sp, i, dayColor, total) {
           避開付費路段
         </label>
       </div>` : ''}
+      ${warnHtml ? `<div class="spot-row2">${warnHtml}</div>` : ''}
     </div>
     <div class="spot-side">
       <button class="btn-spot-del" onclick="deleteSpot('${dayId}','${sp.id}')">✕</button>
@@ -898,10 +914,57 @@ function loadPhotos() {
     photosCache = snap.val() || {};
     if (photoDay) renderPhotoGrid();
   });
-  onValue(ref(db, 'pois'), snap => { poisCache = snap.val() || {}; });
+  onValue(ref(db, 'pois'), snap => {
+    poisCache = snap.val() || {};
+    if (tripLoaded) renderAll();
+  });
 }
 
 let poisCache = {};
+
+// ── OPENING HOURS CHECK ────────────────────────
+// Google's opening_hours.periods use day 0=Sunday..6=Saturday, matching
+// JS Date#getDay(), so trip dates can be checked directly against them.
+function toMin(t) { return parseInt(t.slice(0,2), 10) * 60 + parseInt(t.slice(2,4), 10); }
+function fmtTime(t) { return t.slice(0,2) + ':' + t.slice(2,4); }
+
+function isSpotClosed(poiId, dateStr, timeStr) {
+  const periods = poisCache[poiId]?.openingHours?.periods;
+  if (!periods || !periods.length || !dateStr || !timeStr) return null; // unknown
+  const d = new Date(dateStr + 'T00:00:00');
+  if (isNaN(d)) return null;
+  const dow = d.getDay();
+  const [hh, mm] = timeStr.split(':').map(Number);
+  const targetWk = dow * 1440 + hh * 60 + mm;
+
+  let alwaysOpen = false;
+  const intervals = [];
+  periods.forEach(p => {
+    if (!p.open) return;
+    const openWk = p.open.day * 1440 + toMin(p.open.time);
+    if (!p.close) { alwaysOpen = true; return; }
+    let closeWk = p.close.day * 1440 + toMin(p.close.time);
+    if (closeWk <= openWk) closeWk += 7 * 1440;
+    intervals.push([openWk, closeWk]);
+  });
+  if (alwaysOpen) return false;
+
+  for (const [o, c] of intervals) {
+    if (targetWk >= o && targetWk < c) return false;
+    if (targetWk + 7 * 1440 >= o && targetWk + 7 * 1440 < c) return false; // prev-week wrap
+  }
+  return true; // closed
+}
+
+function hoursTextForDow(poiId, dow) {
+  const periods = poisCache[poiId]?.openingHours?.periods;
+  if (!periods) return '';
+  const wins = periods.filter(p => p.open && p.open.day === dow).map(p => {
+    if (!p.close) return `${fmtTime(p.open.time)}–24 小時營業`;
+    return `${fmtTime(p.open.time)}–${fmtTime(p.close.time)}`;
+  });
+  return wins.length ? wins.join('、') : '公休';
+}
 
 window.openPhotos = function(dayId) {
   photoDay = dayId;
@@ -1266,6 +1329,7 @@ nav {
 .spot-cost { background:transparent; border:none; border-bottom:1px dashed var(--gold); color:var(--gold); font-size:.68rem; width:52px; text-align:right; outline:none; font-family:inherit; }
 .yen { font-size:.62rem; color:var(--gold); }
 .toggle-label { font-size:.68rem; color:var(--muted); display:flex; align-items:center; gap:4px; cursor:pointer; }
+.spot-warn { background:rgba(248,81,73,.15); color:#f85149; border:1px solid rgba(248,81,73,.3); border-radius:5px; padding:2px 7px; font-size:.65rem; cursor:help; white-space:nowrap; }
 
 .btn-spot-del { background:transparent; border:none; color:var(--muted); cursor:pointer; font-size:.82rem; padding:2px; flex-shrink:0; transition:color .15s; }
 .btn-spot-del:hover { color:#f85149; }
