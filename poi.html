@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>景點詳情｜TripMaster</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700;900&family=Playfair+Display:wght@700&display=swap" rel="stylesheet">
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/12.12.1/firebase-app.js";
+import { getAuth, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/12.12.1/firebase-auth.js";
+import { getDatabase, ref, set, get, onValue, push, update, remove }
+  from "https://www.gstatic.com/firebasejs/12.12.1/firebase-database.js";
+import { getStorage, ref as sRef, uploadBytes, getDownloadURL, deleteObject }
+  from "https://www.gstatic.com/firebasejs/12.12.1/firebase-storage.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyCT9AFuUGMuikwcA2wFYAbEs1gxke5i4dA",
+  authDomain: "fukuoka-kyushu-oct2026.firebaseapp.com",
+  databaseURL: "https://fukuoka-kyushu-oct2026-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "fukuoka-kyushu-oct2026",
+  storageBucket: "fukuoka-kyushu-oct2026.firebasestorage.app",
+  messagingSenderId: "101376635642",
+  appId: "1:101376635642:web:d28651919e1df014bb4f43"
+};
+
+const app     = initializeApp(firebaseConfig);
+const auth    = getAuth(app);
+const db      = getDatabase(app);
+const storage = getStorage(app);
+
+const params    = new URLSearchParams(location.search);
+const poiId     = params.get('id');          // null = project docs mode
+const projectId = params.get('project');
+
+const SPOT_TYPES = {
+  attraction:'🗺️ 景點', meal:'🍜 餐廳', snack:'🍡 小吃', transport:'🚗 交通',
+  hotel:'🏨 住宿', ticket:'🎟️ 門票', parking:'🅿️ 停車', toll:'🛣️ 過路費',
+  shopping:'🛍️ 購物', scenery:'🌸 風景', activity:'🎡 活動', gas:'⛽ 加油'
+};
+
+let currentUser = null, currentUd = null, poiData = null;
+let articleTimer = null;
+
+// ── AUTH ──────────────────────────────────────
+onAuthStateChanged(auth, async user => {
+  if (!user) { location.href = 'index.html'; return; }
+  currentUser = user;
+  const snap = await get(ref(db, `users/${user.uid}`));
+  const ud = snap.val();
+  if (!ud || (ud.status !== 'approved' && !ud.isAdmin)) { location.href = 'index.html'; return; }
+  currentUd = ud;
+
+  if (projectId) {
+    const projSnap = await get(ref(db, `projects/${projectId}`));
+    const proj = projSnap.val();
+    const isMember = proj && (ud.isAdmin || proj.ownerId === user.uid ||
+      proj.members?.[user.uid]?.status === 'approved');
+    if (!isMember) { document.getElementById('docs-section').style.display = 'none'; }
+    else {
+      document.getElementById('back-link').href = `trip.html?project=${projectId}`;
+      loadDocs();
+    }
+  } else {
+    document.getElementById('docs-section').style.display = 'none';
+  }
+
+  if (poiId) loadPoi();
+  else enterDocsOnlyMode();
+});
+
+// ── DOCS-ONLY MODE (project folder) ───────────
+function enterDocsOnlyMode() {
+  document.getElementById('poi-section').style.display = 'none';
+  document.getElementById('page-title').textContent = '📁 專案文件夾';
+  if (!projectId) document.getElementById('page-title').textContent = '參數錯誤：缺少 project 或 id';
+}
+
+// ── POI ───────────────────────────────────────
+function loadPoi() {
+  onValue(ref(db, `pois/${poiId}`), snap => {
+    poiData = snap.val();
+    if (!poiData) { document.getElementById('page-title').textContent = '找不到此景點'; return; }
+    document.getElementById('page-title').textContent = poiData.name || '未命名景點';
+    document.getElementById('poi-name').value = poiData.name || '';
+    document.getElementById('poi-category').value = poiData.category || 'attraction';
+    document.getElementById('poi-address').value = poiData.address || '';
+    document.getElementById('poi-links').value = (poiData.links && Object.values(poiData.links).join('\n')) || '';
+    const art = document.getElementById('poi-article');
+    if (document.activeElement !== art) art.value = poiData.article || '';
+    document.getElementById('poi-meta').textContent =
+      `被 ${poiData.usedByCount || 0} 個行程使用｜最後編輯 ${poiData.updatedAt ? new Date(poiData.updatedAt).toLocaleString('zh-TW') : '—'}`;
+    renderPoiPhotos();
+    renderMiniMap();
+  });
+}
+
+window.savePoiField = function(field, value) {
+  if (!poiId) return;
+  const patch = { [field]: value, updatedBy: currentUser.uid, updatedAt: Date.now() };
+  update(ref(db, `pois/${poiId}`), patch);
+  if (field === 'name') document.getElementById('page-title').textContent = value;
+};
+
+window.savePoiLinks = function(value) {
+  const links = value.split('\n').map(s => s.trim()).filter(Boolean);
+  update(ref(db, `pois/${poiId}`), { links, updatedBy: currentUser.uid, updatedAt: Date.now() });
+};
+
+// article: debounce autosave + keep last 10 versions
+window.onArticleInput = function(value) {
+  clearTimeout(articleTimer);
+  document.getElementById('article-status').textContent = '輸入中…';
+  articleTimer = setTimeout(async () => {
+    await update(ref(db, `pois/${poiId}`), {
+      article: value, updatedBy: currentUser.uid, updatedAt: Date.now()
+    });
+    const histRef = push(ref(db, `poisHistory/${poiId}`));
+    await set(histRef, { article: value, by: currentUd?.name || currentUser.uid, ts: Date.now() });
+    const histSnap = await get(ref(db, `poisHistory/${poiId}`));
+    const hist = histSnap.val() || {};
+    const keys = Object.keys(hist).sort();
+    while (keys.length > 10) {
+      await remove(ref(db, `poisHistory/${poiId}/${keys.shift()}`));
+    }
+    document.getElementById('article-status').textContent = '已儲存 ✓';
+  }, 1200);
+};
+
+// ── POI PHOTOS (public, shared) ───────────────
+function renderPoiPhotos() {
+  const grid = document.getElementById('poi-photo-grid');
+  const photos = poiData.photos || {};
+  const entries = Object.entries(photos);
+  document.getElementById('poi-photo-empty').style.display = entries.length ? 'none' : 'block';
+  grid.innerHTML = entries.map(([id, p]) => {
+    const canDel = p.uploadedBy === currentUser?.uid || currentUd?.isAdmin;
+    return `<div class="ph-cell">
+      <img src="${p.url}" loading="lazy" onclick="openLightbox('${p.url}')">
+      ${canDel ? `<button class="ph-del" onclick="deletePoiPhoto('${id}')">✕</button>` : ''}
+    </div>`;
+  }).join('');
+}
+
+function compressImage(file, maxSide = 1600, quality = 0.8) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+      const cv = document.createElement('canvas');
+      cv.width = Math.round(img.width * scale);
+      cv.height = Math.round(img.height * scale);
+      cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+      cv.toBlob(b => b ? resolve(b) : reject(new Error('compress failed')), 'image/jpeg', quality);
+      URL.revokeObjectURL(img.src);
+    };
+    img.onerror = reject;
+    img.src = URL.createObjectURL(file);
+  });
+}
+
+window.uploadPoiPhotos = async function(files) {
+  if (!files?.length || !poiId) return;
+  let done = 0;
+  for (const file of files) {
+    try {
+      const blob = await compressImage(file);
+      const phId = 'ph_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+      const path = `pois/${poiId}/${phId}.jpg`;
+      await uploadBytes(sRef(storage, path), blob, { contentType: 'image/jpeg' });
+      const url = await getDownloadURL(sRef(storage, path));
+      await set(ref(db, `pois/${poiId}/photos/${phId}`), {
+        url, storagePath: path, uploadedBy: currentUser.uid, uploadedAt: Date.now()
+      });
+      done++;
+    } catch (e) {
+      console.error(e);
+      showToast(storageErrMsg(e));
+      break;
+    }
+  }
+  document.getElementById('poi-photo-file').value = '';
+  if (done) showToast(`已上傳 ${done} 張照片`);
+};
+
+window.deletePoiPhoto = async function(phId) {
+  const p = poiData?.photos?.[phId];
+  if (!p || !confirm('刪除這張公用照片？')) return;
+  try { if (p.storagePath) await deleteObject(sRef(storage, p.storagePath)); } catch (e) {}
+  await remove(ref(db, `pois/${poiId}/photos/${phId}`));
+};
+
+// ── PRIVATE DOCS (project members only) ───────
+let docsCache = {};
+
+function loadDocs() {
+  onValue(ref(db, `docs/${projectId}`), snap => {
+    docsCache = snap.val() || {};
+    renderDocs();
+  });
+}
+
+function renderDocs() {
+  const list = document.getElementById('docs-list');
+  const entries = Object.entries(docsCache)
+    .filter(([, d]) => poiId ? d.spotPoiId === poiId : true)
+    .sort((a, b) => b[1].uploadedAt - a[1].uploadedAt);
+  document.getElementById('docs-empty').style.display = entries.length ? 'none' : 'block';
+  list.innerHTML = entries.map(([id, d]) => {
+    const canDel = d.uploadedBy === currentUser?.uid || currentUd?.isAdmin;
+    const icon = d.mime?.includes('pdf') ? '📄' : d.mime?.startsWith('image/') ? '🖼️' : '📎';
+    const size = d.size > 1048576 ? (d.size/1048576).toFixed(1)+' MB' : Math.round(d.size/1024)+' KB';
+    const scope = !poiId && d.spotPoiId ? `<span class="doc-scope">景點文件</span>` : '';
+    return `<div class="doc-row">
+      <span class="doc-icon">${icon}</span>
+      <div class="doc-info">
+        <a href="${d.url}" target="_blank" class="doc-name">${escHtml(d.fileName)}</a>
+        <div class="doc-meta">${size}｜${escHtml(d.uploaderName || '')}｜${new Date(d.uploadedAt).toLocaleDateString('zh-TW')} ${scope}</div>
+      </div>
+      ${canDel ? `<button class="doc-del" onclick="deleteDoc('${id}')">🗑</button>` : ''}
+    </div>`;
+  }).join('');
+}
+
+window.uploadDocs = async function(files) {
+  if (!files?.length || !projectId) return;
+  for (const file of files) {
+    if (file.size > 10 * 1048576) { showToast(`「${file.name}」超過 10MB 上限`); continue; }
+    try {
+      const docId = 'doc_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+      const path = `projects/${projectId}/docs/${docId}_${file.name}`;
+      await uploadBytes(sRef(storage, path), file, { contentType: file.type || 'application/octet-stream' });
+      const url = await getDownloadURL(sRef(storage, path));
+      await set(ref(db, `docs/${projectId}/${docId}`), {
+        spotPoiId: poiId || null,
+        fileName: file.name, url, storagePath: path,
+        size: file.size, mime: file.type || '',
+        uploadedBy: currentUser.uid, uploaderName: currentUd?.name || '',
+        uploadedAt: Date.now()
+      });
+      showToast(`已上傳：${file.name} 🔒`);
+    } catch (e) {
+      console.error(e);
+      showToast(storageErrMsg(e));
+      break;
+    }
+  }
+  document.getElementById('doc-file').value = '';
+};
+
+window.deleteDoc = async function(docId) {
+  const d = docsCache[docId];
+  if (!d || !confirm(`刪除「${d.fileName}」？`)) return;
+  try { if (d.storagePath) await deleteObject(sRef(storage, d.storagePath)); } catch (e) {}
+  await remove(ref(db, `docs/${projectId}/${docId}`));
+};
+
+// ── MINI MAP ──────────────────────────────────
+let miniMap = null;
+window.initMap = function() { window.__mapsReady = true; renderMiniMap(); };
+
+function renderMiniMap() {
+  if (!window.__mapsReady || !poiData?.lat || !poiData?.lng || miniMap) return;
+  const el = document.getElementById('mini-map');
+  el.style.display = 'block';
+  miniMap = new google.maps.Map(el, {
+    center: { lat: poiData.lat, lng: poiData.lng }, zoom: 15,
+    mapTypeControl: false, streetViewControl: false, fullscreenControl: false, disableDefaultUI: true
+  });
+  new google.maps.Marker({ position: { lat: poiData.lat, lng: poiData.lng }, map: miniMap });
+  setTimeout(() => { google.maps.event.trigger(miniMap, 'resize'); miniMap.setCenter({ lat: poiData.lat, lng: poiData.lng }); }, 400);
+}
+
+// ── UTILS ─────────────────────────────────────
+function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'); }
+window.escHtml = escHtml;
+
+function storageErrMsg(e) {
+  return (e.code === 'storage/unknown' || e.code === 'storage/unauthorized' || e.code === 'storage/retry-limit-exceeded')
+    ? '上傳失敗：Firebase Storage 尚未開通（需 Blaze 方案）'
+    : '上傳失敗：' + (e.message || e);
+}
+
+window.openLightbox = function(url) {
+  document.getElementById('lightbox-img').src = url;
+  document.getElementById('lightbox').classList.add('open');
+};
+
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2600);
+}
+window.showToast = showToast;
+</script>
+
+<style>
+:root {
+  --night:#0d1117; --surface:#161b22; --surface2:#21262d;
+  --border:rgba(255,255,255,0.08); --text:#e6edf3; --muted:#8b949e;
+  --accent:#f78166; --gold:#d4a843;
+}
+* { box-sizing:border-box; margin:0; padding:0; }
+body { font-family:'Noto Sans TC',sans-serif; background:var(--night); color:var(--text); min-height:100vh; }
+
+nav { background:rgba(13,17,23,.96); border-bottom:1px solid var(--border); padding:0 16px; display:flex; align-items:center; height:56px; gap:12px; position:sticky; top:0; z-index:100; }
+.nav-logo { font-family:'Playfair Display',serif; font-size:1.1rem; background:linear-gradient(135deg,#f78166,#d4a843); -webkit-background-clip:text; -webkit-text-fill-color:transparent; text-decoration:none; }
+.nav-back { font-size:.78rem; color:var(--muted); text-decoration:none; }
+.nav-back:hover { color:var(--text); }
+
+.wrap { max-width:760px; margin:0 auto; padding:20px 16px 60px; display:flex; flex-direction:column; gap:16px; }
+h1 { font-family:'Playfair Display','Noto Sans TC',serif; font-size:1.4rem; }
+.poi-meta { font-size:.7rem; color:var(--muted); }
+
+.card { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:16px; }
+.card h2 { font-size:.85rem; margin-bottom:10px; color:var(--gold); }
+.field-row { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:10px; }
+.field { flex:1; min-width:180px; }
+.field label { display:block; font-size:.65rem; color:var(--muted); margin-bottom:3px; }
+.field input, .field select, .field textarea {
+  width:100%; background:var(--surface2); border:1px solid var(--border); border-radius:8px;
+  color:var(--text); font-size:.82rem; padding:8px 10px; outline:none; font-family:inherit;
+}
+.field textarea { resize:vertical; line-height:1.7; }
+#poi-article { min-height:220px; }
+.article-status { font-size:.65rem; color:var(--muted); text-align:right; margin-top:4px; }
+#mini-map { display:none; height:200px; border-radius:10px; margin-top:10px; }
+
+.ph-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(110px,1fr)); gap:8px; }
+.ph-cell { position:relative; }
+.ph-cell img { width:100%; height:90px; object-fit:cover; border-radius:8px; cursor:pointer; display:block; }
+.ph-del { position:absolute; top:4px; right:4px; background:rgba(0,0,0,.6); border:none; color:#fff; border-radius:50%; width:20px; height:20px; font-size:.65rem; cursor:pointer; }
+.upload-btn { background:linear-gradient(135deg,#f78166,#d4a843); color:#fff; border:none; border-radius:8px; padding:8px 16px; font-size:.75rem; font-weight:700; cursor:pointer; font-family:inherit; margin-top:10px; }
+.empty-hint { font-size:.72rem; color:var(--muted); padding:14px 0; text-align:center; }
+
+.private-badge { font-size:.6rem; background:rgba(248,81,73,.15); color:#f85149; border:1px solid rgba(248,81,73,.3); border-radius:5px; padding:2px 7px; margin-left:6px; vertical-align:middle; }
+.doc-row { display:flex; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid rgba(255,255,255,.05); }
+.doc-row:last-child { border-bottom:none; }
+.doc-icon { font-size:1.2rem; }
+.doc-info { flex:1; min-width:0; }
+.doc-name { color:var(--text); font-size:.8rem; text-decoration:none; word-break:break-all; }
+.doc-name:hover { color:var(--accent); }
+.doc-meta { font-size:.62rem; color:var(--muted); margin-top:2px; }
+.doc-scope { color:var(--gold); }
+.doc-del { background:none; border:none; color:var(--muted); cursor:pointer; font-size:.85rem; }
+.doc-del:hover { color:#f85149; }
+
+#lightbox { position:fixed; inset:0; background:rgba(0,0,0,.9); z-index:600; display:none; align-items:center; justify-content:center; cursor:zoom-out; }
+#lightbox.open { display:flex; }
+#lightbox img { max-width:94%; max-height:94%; border-radius:8px; }
+
+.toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%) translateY(50px); background:var(--surface); border:1px solid var(--border); color:var(--text); padding:9px 18px; border-radius:20px; font-size:.8rem; opacity:0; transition:transform .3s,opacity .3s; z-index:999; pointer-events:none; white-space:nowrap; }
+.toast.show { transform:translateX(-50%) translateY(0); opacity:1; }
+
+@media (max-width:600px) {
+  .field input, .field select, .field textarea { font-size:.95rem; }
+  h1 { font-size:1.2rem; }
+}
+</style>
+</head>
+<body>
+
+<nav>
+  <a class="nav-logo" href="index.html">TripMaster</a>
+  <a class="nav-back" id="back-link" href="index.html">← 返回</a>
+</nav>
+
+<div class="wrap">
+  <div>
+    <h1 id="page-title">載入中…</h1>
+    <div class="poi-meta" id="poi-meta"></div>
+  </div>
+
+  <!-- POI SECTION -->
+  <div id="poi-section" style="display:flex;flex-direction:column;gap:16px">
+    <div class="card">
+      <h2>📌 基本資訊（共用，所有成員可編輯）</h2>
+      <div class="field-row">
+        <div class="field">
+          <label>名稱</label>
+          <input id="poi-name" onchange="savePoiField('name', this.value)">
+        </div>
+        <div class="field" style="max-width:140px">
+          <label>分類</label>
+          <select id="poi-category" onchange="savePoiField('category', this.value)">
+            <option value="attraction">🗺️ 景點</option><option value="meal">🍜 餐廳</option>
+            <option value="snack">🍡 小吃</option><option value="transport">🚗 交通</option>
+            <option value="hotel">🏨 住宿</option><option value="ticket">🎟️ 門票</option>
+            <option value="parking">🅿️ 停車</option><option value="toll">🛣️ 過路費</option>
+            <option value="shopping">🛍️ 購物</option><option value="scenery">🌸 風景</option>
+            <option value="activity">🎡 活動</option><option value="gas">⛽ 加油</option>
+          </select>
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label>地址</label>
+          <input id="poi-address" onchange="savePoiField('address', this.value)">
+        </div>
+      </div>
+      <div class="field">
+        <label>相關連結（每行一個網址）</label>
+        <textarea id="poi-links" rows="2" onchange="savePoiLinks(this.value)"></textarea>
+      </div>
+      <div id="mini-map"></div>
+    </div>
+
+    <div class="card">
+      <h2>📝 景點文章（共編）</h2>
+      <div class="field">
+        <textarea id="poi-article" placeholder="介紹、攻略、注意事項、推薦菜色…（自動儲存）" oninput="onArticleInput(this.value)"></textarea>
+      </div>
+      <div class="article-status" id="article-status"></div>
+    </div>
+
+    <div class="card">
+      <h2>🖼️ 公用照片（菜單、環境、風景）</h2>
+      <div class="ph-grid" id="poi-photo-grid"></div>
+      <div class="empty-hint" id="poi-photo-empty">尚無照片</div>
+      <input type="file" id="poi-photo-file" accept="image/*" multiple style="display:none" onchange="uploadPoiPhotos(this.files)">
+      <button class="upload-btn" onclick="document.getElementById('poi-photo-file').click()">⬆ 上傳照片</button>
+    </div>
+  </div>
+
+  <!-- PRIVATE DOCS SECTION -->
+  <div class="card" id="docs-section">
+    <h2>🔒 私人文件<span class="private-badge">僅本專案成員可見</span></h2>
+    <div id="docs-list"></div>
+    <div class="empty-hint" id="docs-empty">尚無文件（住宿訂單、機票、預約確認信…）</div>
+    <input type="file" id="doc-file" multiple style="display:none" onchange="uploadDocs(this.files)">
+    <button class="upload-btn" onclick="document.getElementById('doc-file').click()">⬆ 上傳文件（≤10MB）</button>
+  </div>
+</div>
+
+<div id="lightbox" onclick="this.classList.remove('open')"><img id="lightbox-img" src="" alt=""></div>
+<div class="toast" id="toast"></div>
+
+<script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyC-QgKIKtZkmWIOXawmGBHVci4kKJOF7W0&callback=initMap&loading=async" async defer></script>
+</body>
+</html>

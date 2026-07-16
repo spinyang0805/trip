@@ -19,6 +19,8 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/12.12.1/fireba
 import { getAuth, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/12.12.1/firebase-auth.js";
 import { getDatabase, ref, set, get, onValue, push, update, remove, serverTimestamp }
   from "https://www.gstatic.com/firebasejs/12.12.1/firebase-database.js";
+import { getStorage, ref as sRef, uploadBytes, getDownloadURL, deleteObject }
+  from "https://www.gstatic.com/firebasejs/12.12.1/firebase-storage.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyCT9AFuUGMuikwcA2wFYAbEs1gxke5i4dA",
@@ -33,6 +35,7 @@ const firebaseConfig = {
 const app  = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db   = getDatabase(app);
+const storage = getStorage(app);
 
 const ADMIN_EMAIL = "a45436@gmail.com";
 
@@ -40,6 +43,7 @@ const urlParams = new URLSearchParams(location.search);
 const projectId = urlParams.get('project') || 'main';
 
 let currentUser = null;
+let currentUd   = null;
 let projectMeta = null;
 let tripData    = { title: '', budget: 0, days: {} };
 let map, directionsService;
@@ -64,8 +68,10 @@ onAuthStateChanged(auth, async user => {
     projectMeta.members?.[user.uid]?.status === 'approved'
   );
   if (!isMember) { location.href = 'index.html'; return; }
+  currentUd = ud;
   document.getElementById('user-name').textContent = ud.name || '';
   loadTrip();
+  loadPhotos();
 });
 
 // ── LOAD TRIP ─────────────────────────────────
@@ -103,25 +109,34 @@ function renderAll() {
     return;
   }
 
+  loadCollapseState(dayKeys);
+
   container.innerHTML = dayKeys.map((dayId, idx) => {
     const day   = tripData.days[dayId];
     const spots = getSpotsArray(day);
     const color = DAY_COLORS[idx % DAY_COLORS.length];
     const totalCost = spots.reduce((s, sp) => s + (parseFloat(sp.cost)||0), 0);
+    const collapsed = !!collapsedDays[dayId];
+    const summary = spots.length
+      ? `${spots.length} 個景點${spots[0]?.name ? '｜' + esc(spots[0].name) + (spots.length > 1 ? ' → ' + esc(spots[spots.length-1].name) : '') : ''}`
+      : '尚無景點';
     return `
-    <div class="day-card" data-day="${dayId}">
-      <div class="day-hd" style="border-left:4px solid ${color}">
+    <div class="day-card ${collapsed ? 'collapsed' : ''}" data-day="${dayId}">
+      <div class="day-hd" style="border-left:4px solid ${color}" onclick="toggleDayCollapse('${dayId}', event)">
         <div class="day-hd-left">
+          <span class="day-chevron">${collapsed ? '▸' : '▾'}</span>
           <span class="day-pill" style="background:${color}22;color:${color}">Day ${idx+1}</span>
           <input class="day-date" type="date" value="${day.date||''}" onchange="updateDayDate('${dayId}',this.value)">
         </div>
         <div class="day-hd-right">
           <span class="day-cost" style="color:${color}">¥${totalCost.toLocaleString()}</span>
+          <button class="btn-ic" title="照片" onclick="openPhotos('${dayId}')">📸</button>
           <button class="btn-map-day" style="background:${color}" onclick="showDayOnMap('${dayId}')">🗺 地圖</button>
           <button class="btn-ic" onclick="focusAdd('${dayId}')">＋</button>
           <button class="btn-ic danger" onclick="deleteDay('${dayId}')">🗑</button>
         </div>
       </div>
+      ${collapsed ? `<div class="day-summary" onclick="toggleDayCollapse('${dayId}')">${summary}</div>` : ''}
       <ul class="spots-list" id="spots-${dayId}">
         ${spots.map((sp, i) => renderSpot(dayId, sp, i, color, spots.length)).join('')}
       </ul>
@@ -164,10 +179,17 @@ const DAY_COLORS = ['#4a7c59','#c4783a','#2e6da4','#8e44ad','#c0392b','#16a085',
 function renderSpot(dayId, sp, i, dayColor, total) {
   const t = SPOT_TYPES[sp.type] || SPOT_TYPES.attraction;
   const isLast = i === total - 1;
+  const dayKeys = Object.keys(tripData.days || {}).sort();
+  const moveOptions = dayKeys.filter(k => k !== dayId)
+    .map(k => `<option value="${k}">移至 Day ${dayKeys.indexOf(k)+1}</option>`).join('');
   return `
   <li class="spot-item" draggable="true" data-spot="${sp.id}" data-day="${dayId}">
     <div class="spot-left">
       <div class="spot-num" style="background:${dayColor}">${i+1}</div>
+      <div class="spot-reorder">
+        <button class="btn-reorder" onclick="moveSpot('${dayId}','${sp.id}',-1)" ${i===0?'disabled':''}>▲</button>
+        <button class="btn-reorder" onclick="moveSpot('${dayId}','${sp.id}',1)" ${isLast?'disabled':''}>▼</button>
+      </div>
       ${!isLast ? `<div class="spot-line" style="background:${dayColor}"></div>` : ''}
     </div>
     <div class="spot-type-icon" style="background:${t.color}22;color:${t.color}" title="${t.label}">${t.icon}</div>
@@ -199,7 +221,13 @@ function renderSpot(dayId, sp, i, dayColor, total) {
         </label>
       </div>` : ''}
     </div>
-    <button class="btn-spot-del" onclick="deleteSpot('${dayId}','${sp.id}')">✕</button>
+    <div class="spot-side">
+      <button class="btn-spot-del" onclick="deleteSpot('${dayId}','${sp.id}')">✕</button>
+      <button class="btn-spot-detail" title="景點詳情" onclick="openPoiDetail('${dayId}','${sp.id}')">📖</button>
+      ${moveOptions ? `<select class="spot-move-sel" onchange="moveSpotToDay('${dayId}','${sp.id}',this.value)">
+        <option value="">⇄</option>${moveOptions}
+      </select>` : ''}
+    </div>
   </li>`;
 }
 
@@ -237,9 +265,100 @@ function initMapReal() {
     ]
   });
   directionsService = new google.maps.DirectionsService();
+
+  // POI click-to-add: clicking a place icon opens an add-to-day card
+  map.addListener('click', e => {
+    if (e.placeId) {
+      e.stop(); // suppress default InfoWindow
+      openPoiCardByPlaceId(e.placeId);
+    } else if (e.latLng) {
+      openPoiCardByLatLng(e.latLng);
+    }
+  });
+
   renderAll();
   kickMapResize();
 }
+
+// ── MAP POI CARD ──────────────────────────────
+let pendingPlace = null;
+
+function dayOptionsHtml() {
+  const dayKeys = Object.keys(tripData.days || {}).sort();
+  return dayKeys.map((k, i) => `<option value="${k}" ${k === activeDay ? 'selected' : ''}>加入 Day ${i+1}</option>`).join('');
+}
+
+function showPoiCard(html) {
+  const card = document.getElementById('poi-card');
+  card.innerHTML = `<button class="pc-close" onclick="closePoiCard()">✕</button>` + html;
+  card.style.display = 'block';
+}
+
+window.closePoiCard = function() {
+  document.getElementById('poi-card').style.display = 'none';
+  pendingPlace = null;
+};
+
+function openPoiCardByPlaceId(placeId) {
+  const svc = new google.maps.places.PlacesService(map);
+  svc.getDetails({ placeId, fields: ['name','rating','formatted_address','photos','geometry','place_id'] }, (place, status) => {
+    if (status !== google.maps.places.PlacesServiceStatus.OK || !place) {
+      showToast('無法取得地點資訊'); return;
+    }
+    pendingPlace = {
+      name: place.name,
+      lat: place.geometry.location.lat(),
+      lng: place.geometry.location.lng(),
+      placeId: place.place_id
+    };
+    const photo = place.photos?.[0]?.getUrl({ maxWidth: 400, maxHeight: 200 });
+    showPoiCard(`
+      ${photo ? `<img class="pc-photo" src="${photo}" alt="">` : ''}
+      <div class="pc-name">${esc(place.name)}</div>
+      <div class="pc-meta">
+        ${place.rating ? `⭐ ${place.rating}　` : ''}${esc(place.formatted_address || '')}
+      </div>
+      <div class="pc-row">
+        <select id="pc-day-sel">${dayOptionsHtml()}</select>
+        <button class="pc-add" onclick="addSpotFromCard()">＋ 加入</button>
+      </div>`);
+  });
+}
+
+function openPoiCardByLatLng(latLng) {
+  new google.maps.Geocoder().geocode({ location: latLng }, (results, status) => {
+    const addr = (status === 'OK' && results[0]) ? results[0].formatted_address : '';
+    pendingPlace = { name: '', lat: latLng.lat(), lng: latLng.lng(), placeId: null };
+    showPoiCard(`
+      <div class="pc-name">📍 自訂景點</div>
+      <div class="pc-meta">${esc(addr)}</div>
+      <input id="pc-name-inp" placeholder="輸入景點名稱" style="width:100%;margin-bottom:8px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.78rem;padding:6px 8px;outline:none;font-family:inherit">
+      <div class="pc-row">
+        <select id="pc-day-sel">${dayOptionsHtml()}</select>
+        <button class="pc-add" onclick="addSpotFromCard()">＋ 加入</button>
+      </div>`);
+  });
+}
+
+window.addSpotFromCard = function() {
+  if (!pendingPlace) return;
+  const nameInp = document.getElementById('pc-name-inp');
+  const name = nameInp ? nameInp.value.trim() : pendingPlace.name;
+  if (!name) { showToast('請輸入景點名稱'); return; }
+  const dayId = document.getElementById('pc-day-sel')?.value;
+  if (!dayId || !tripData.days[dayId]) { showToast('請先新增天數'); return; }
+  if (!tripData.days[dayId].spots) tripData.days[dayId].spots = {};
+  tripData.days[dayId].spots['spot_' + Date.now()] = {
+    name, type: 'attraction', time: '', note: '', cost: 0,
+    lat: pendingPlace.lat, lng: pendingPlace.lng,
+    placeId: pendingPlace.placeId || null
+  };
+  save();
+  closePoiCard();
+  const dayKeys = Object.keys(tripData.days).sort();
+  showToast(`已加入 Day ${dayKeys.indexOf(dayId)+1}：${name}`);
+  if (activeDay === dayId) setTimeout(() => showDayOnMap(dayId), 300);
+};
 window.__onMapsReady = initMapReal;
 if (window.__mapsReady) initMapReal();
 
@@ -265,6 +384,9 @@ function showDayOnMap(dayId) {
   if (!map) return;
   activeDay = dayId;
   clearMap();
+  routeStats[dayId] = {};
+  const ri = document.getElementById('route-info');
+  if (ri) ri.style.display = 'none';
 
   const dayKeys = Object.keys(tripData.days || {}).sort();
   renderMapTabs(dayKeys);
@@ -311,14 +433,26 @@ function showDayOnMap(dayId) {
       renderer.setMap(map);
       renderers[dayId].push(renderer);
 
+      const segIdx = i;
       directionsService.route({
         origin:      { lat: sp.lat,   lng: sp.lng },
         destination: { lat: next.lat, lng: next.lng },
         travelMode:  google.maps.TravelMode.DRIVING,
         avoidTolls:  useAvoidTolls,
       }, (result, status) => {
-        if (status === 'OK') renderer.setDirections(result);
-        else {
+        if (status === 'OK') {
+          renderer.setDirections(result);
+          const leg = result.routes[0]?.legs[0];
+          if (leg) {
+            routeStats[dayId] = routeStats[dayId] || {};
+            routeStats[dayId][segIdx] = {
+              from: sp.name, to: next.name,
+              durText: leg.duration?.text || '', durVal: leg.duration?.value || 0,
+              distText: leg.distance?.text || ''
+            };
+            if (activeDay === dayId) renderRouteInfo(dayId);
+          }
+        } else {
           // fallback polyline
           new google.maps.Polyline({
             path: [{ lat: sp.lat, lng: sp.lng }, { lat: next.lat, lng: next.lng }],
@@ -333,6 +467,21 @@ function showDayOnMap(dayId) {
 }
 
 const SEGMENT_COLORS = ['#ff6b6b','#ffd93d','#6bcb77','#4d96ff','#ff922b','#cc5de8','#20c997','#f06595','#a9e34b','#74c0fc'];
+
+// ── ROUTE INFO PANEL ──────────────────────────
+let routeStats = {};
+
+function renderRouteInfo(dayId) {
+  const el = document.getElementById('route-info');
+  const stats = routeStats[dayId];
+  if (!stats || Object.keys(stats).length === 0) { el.style.display = 'none'; return; }
+  const segs = Object.keys(stats).sort((a,b) => a-b).map(k => stats[k]);
+  const totalMin = Math.round(segs.reduce((s, x) => s + x.durVal, 0) / 60);
+  const totalTxt = totalMin >= 60 ? `${Math.floor(totalMin/60)} 小時 ${totalMin%60} 分` : `${totalMin} 分`;
+  el.innerHTML = `<div class="ri-total">🚗 當日總車程約 ${totalTxt}</div>` +
+    segs.map((x, i) => `<div class="ri-seg">${i+1}→${i+2}　${x.durText}（${x.distText}）</div>`).join('');
+  el.style.display = 'block';
+}
 
 function addMarker(sp, num, color, icon) {
   const infoContent = `
@@ -441,10 +590,22 @@ window.quickAdd = function(dayId) {
   inp.value = '';
   if (!tripData.days[dayId].spots) tripData.days[dayId].spots = {};
   const spotId = 'spot_' + Date.now();
-  tripData.days[dayId].spots[spotId] = { name, type, time:'', note:'', cost:0, lat:null, lng:null };
-  save();
-  geocodeAndSave(dayId, spotId, name);
-  showToast('已新增：' + name);
+  // reuse a shared POI when the name matches the library
+  const hit = Object.entries(poisCache).find(([, p]) =>
+    p.name === name || (p.nameAliases && Object.values(p.nameAliases).includes(name)));
+  if (hit && hit[1].lat && hit[1].lng) {
+    tripData.days[dayId].spots[spotId] = { name, type, time:'', note:'', cost:0,
+      lat: hit[1].lat, lng: hit[1].lng, poiId: hit[0], placeId: hit[1].placeId || null };
+    save();
+    update(ref(db, `pois/${hit[0]}`), { usedByCount: (hit[1].usedByCount || 0) + 1 });
+    if (activeDay === dayId) setTimeout(() => showDayOnMap(dayId), 300);
+    showToast(`已從景點庫加入：${name} 📚`);
+  } else {
+    tripData.days[dayId].spots[spotId] = { name, type, time:'', note:'', cost:0, lat:null, lng:null };
+    save();
+    geocodeAndSave(dayId, spotId, name);
+    showToast('已新增：' + name);
+  }
 };
 
 window.updateSpot = function(dayId, spotId, field, value) {
@@ -459,6 +620,76 @@ window.deleteSpot = function(dayId, spotId) {
   save();
   if (activeDay === dayId) showDayOnMap(dayId);
   showToast('已刪除景點');
+};
+
+// ── REORDER (mobile-friendly) ─────────────────
+function rekeySpots(dayId, keys) {
+  const spots = tripData.days[dayId].spots;
+  const ns = {};
+  keys.forEach((k, i) => { ns['spot_' + String(i).padStart(8, '0')] = spots[k]; });
+  tripData.days[dayId].spots = ns;
+}
+
+window.moveSpot = function(dayId, spotId, dir) {
+  const keys = Object.keys(tripData.days[dayId].spots).sort();
+  const i = keys.indexOf(spotId);
+  const j = i + dir;
+  if (i < 0 || j < 0 || j >= keys.length) return;
+  [keys[i], keys[j]] = [keys[j], keys[i]];
+  rekeySpots(dayId, keys);
+  save();
+  showToast('順序已更新 ✓');
+  setTimeout(() => { if (activeDay === dayId) showDayOnMap(dayId); }, 300);
+};
+
+window.moveSpotToDay = function(dayId, spotId, targetDayId) {
+  if (!targetDayId || !tripData.days[targetDayId]) return;
+  const sp = tripData.days[dayId].spots[spotId];
+  if (!sp) return;
+  delete tripData.days[dayId].spots[spotId];
+  if (!tripData.days[targetDayId].spots) tripData.days[targetDayId].spots = {};
+  // 'spot_' + timestamp sorts after zero-padded keys, so the spot lands at the end
+  tripData.days[targetDayId].spots['spot_' + Date.now()] = sp;
+  save();
+  const dayKeys = Object.keys(tripData.days).sort();
+  showToast(`已移至 Day ${dayKeys.indexOf(targetDayId) + 1} ✓`);
+};
+
+// ── DAY COLLAPSE ──────────────────────────────
+const collapseKey = 'tm_collapse_' + projectId;
+let collapsedDays = null; // null = not yet initialized
+
+function loadCollapseState(dayKeys) {
+  if (collapsedDays) return;
+  try {
+    const saved = JSON.parse(localStorage.getItem(collapseKey));
+    if (saved && typeof saved === 'object') { collapsedDays = saved; return; }
+  } catch (e) {}
+  // default: collapse all except the first day
+  collapsedDays = {};
+  dayKeys.forEach((k, i) => { collapsedDays[k] = i !== 0; });
+}
+
+function saveCollapseState() {
+  localStorage.setItem(collapseKey, JSON.stringify(collapsedDays));
+}
+
+window.toggleDayCollapse = function(dayId, ev) {
+  if (ev) {
+    const t = ev.target.tagName;
+    if (t === 'INPUT' || t === 'BUTTON' || t === 'SELECT' || t === 'OPTION') return;
+  }
+  collapsedDays[dayId] = !collapsedDays[dayId];
+  saveCollapseState();
+  renderAll();
+};
+
+window.toggleAllDays = function() {
+  const dayKeys = Object.keys(tripData.days || {}).sort();
+  const anyOpen = dayKeys.some(k => !collapsedDays[k]);
+  dayKeys.forEach(k => { collapsedDays[k] = anyOpen; });
+  saveCollapseState();
+  renderAll();
 };
 
 // ── BUDGET BAR ────────────────────────────────
@@ -523,6 +754,142 @@ window.toggleMap = function() {
     itinerary.classList.remove('map-open');
     btn.textContent = '🗺 地圖';
   }
+};
+
+// ── PHOTOS (per-day, planning / memory) ───────
+let photosCache = {};   // dayId -> { photoId: meta }
+let photoDay = null, photoTab = 'planning';
+
+function loadPhotos() {
+  onValue(ref(db, `photos/${projectId}`), snap => {
+    photosCache = snap.val() || {};
+    if (photoDay) renderPhotoGrid();
+  });
+  onValue(ref(db, 'pois'), snap => { poisCache = snap.val() || {}; });
+}
+
+let poisCache = {};
+
+window.openPhotos = function(dayId) {
+  photoDay = dayId;
+  photoTab = 'planning';
+  const dayKeys = Object.keys(tripData.days || {}).sort();
+  document.getElementById('pm-title').textContent = `Day ${dayKeys.indexOf(dayId)+1} 照片`;
+  switchPhotoTab('planning');
+  document.getElementById('photo-modal-mask').classList.add('open');
+};
+
+window.closePhotos = function() {
+  document.getElementById('photo-modal-mask').classList.remove('open');
+  photoDay = null;
+};
+
+window.switchPhotoTab = function(tab) {
+  photoTab = tab;
+  document.getElementById('pm-tab-planning').classList.toggle('active', tab === 'planning');
+  document.getElementById('pm-tab-memory').classList.toggle('active', tab === 'memory');
+  renderPhotoGrid();
+};
+
+function renderPhotoGrid() {
+  const grid = document.getElementById('pm-grid');
+  const all = photosCache[photoDay] || {};
+  const items = Object.entries(all).filter(([, p]) => (p.kind || 'planning') === photoTab);
+  document.getElementById('pm-empty').style.display = items.length ? 'none' : 'block';
+  grid.innerHTML = items.map(([id, p]) => {
+    const canDel = p.uploadedBy === currentUser?.uid || currentUd?.isAdmin;
+    return `<div class="pm-cell">
+      <img src="${p.url}" loading="lazy" onclick="openLightbox('${p.url}')">
+      ${canDel ? `<button class="pm-del" onclick="deletePhoto('${id}')">✕</button>` : ''}
+      ${p.caption ? `<div class="pm-cap">${esc(p.caption)}</div>` : ''}
+    </div>`;
+  }).join('');
+}
+
+function compressImage(file, maxSide = 1600, quality = 0.8) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+      const cv = document.createElement('canvas');
+      cv.width = Math.round(img.width * scale);
+      cv.height = Math.round(img.height * scale);
+      cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+      cv.toBlob(b => b ? resolve(b) : reject(new Error('compress failed')), 'image/jpeg', quality);
+      URL.revokeObjectURL(img.src);
+    };
+    img.onerror = reject;
+    img.src = URL.createObjectURL(file);
+  });
+}
+
+window.uploadPhotos = async function(files) {
+  if (!files?.length || !photoDay) return;
+  const hint = document.getElementById('pm-hint');
+  let done = 0;
+  for (const file of files) {
+    try {
+      hint.textContent = `上傳中… ${done+1}/${files.length}`;
+      const blob = await compressImage(file);
+      const photoId = 'ph_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+      const path = `projects/${projectId}/days/${photoDay}/${photoId}.jpg`;
+      await uploadBytes(sRef(storage, path), blob, { contentType: 'image/jpeg' });
+      const url = await getDownloadURL(sRef(storage, path));
+      await set(ref(db, `photos/${projectId}/${photoDay}/${photoId}`), {
+        kind: photoTab, url, storagePath: path,
+        uploadedBy: currentUser.uid, uploaderName: currentUd?.name || '',
+        uploadedAt: Date.now()
+      });
+      done++;
+    } catch (e) {
+      console.error('upload failed:', e);
+      showToast(e.code === 'storage/unknown' || e.code === 'storage/unauthorized'
+        ? '上傳失敗：Firebase Storage 尚未開通（需 Blaze 方案）'
+        : '上傳失敗：' + (e.message || e));
+      break;
+    }
+  }
+  hint.textContent = '自動壓縮後上傳';
+  document.getElementById('pm-file').value = '';
+  if (done) showToast(`已上傳 ${done} 張照片 📸`);
+};
+
+window.deletePhoto = async function(photoId) {
+  const p = photosCache[photoDay]?.[photoId];
+  if (!p) return;
+  if (!confirm('刪除這張照片？')) return;
+  try { if (p.storagePath) await deleteObject(sRef(storage, p.storagePath)); } catch (e) {}
+  await remove(ref(db, `photos/${projectId}/${photoDay}/${photoId}`));
+  showToast('已刪除照片');
+};
+
+window.openLightbox = function(url) {
+  document.getElementById('lightbox-img').src = url;
+  document.getElementById('lightbox').classList.add('open');
+};
+
+// ── POI DETAIL (shared library) ───────────────
+window.openPoiDetail = async function(dayId, spotId) {
+  const sp = tripData.days[dayId]?.spots?.[spotId];
+  if (!sp) return;
+  let poiId = sp.poiId;
+  if (!poiId) {
+    // promote this spot into the shared POI library
+    const poiRef = push(ref(db, 'pois'));
+    poiId = poiRef.key;
+    await set(poiRef, {
+      name: sp.name || '未命名景點',
+      placeId: sp.placeId || null,
+      lat: sp.lat || null, lng: sp.lng || null,
+      category: sp.type || 'attraction',
+      article: '', links: [],
+      createdBy: currentUser.uid, updatedBy: currentUser.uid,
+      updatedAt: Date.now(), usedByCount: 1
+    });
+    tripData.days[dayId].spots[spotId].poiId = poiId;
+    save();
+  }
+  location.href = `poi.html?id=${poiId}&project=${projectId}`;
 };
 
 // ── SHARE ─────────────────────────────────────
@@ -725,6 +1092,63 @@ nav {
 #map-nav-btn { position:absolute; bottom:16px; right:16px; background:linear-gradient(135deg,#2e6da4,#1a6b8a); color:#fff; border:none; border-radius:10px; padding:10px 16px; font-size:.8rem; font-family:inherit; font-weight:600; cursor:pointer; box-shadow:0 4px 16px rgba(46,109,164,.5); z-index:10; display:none; align-items:center; gap:6px; transition:transform .15s; }
 #map-nav-btn:hover { transform:translateY(-2px); }
 
+/* ── REORDER / SPOT SIDE ── */
+.spot-reorder { display:flex; flex-direction:column; gap:2px; margin-top:4px; }
+.btn-reorder { background:var(--surface2); border:1px solid var(--border); border-radius:4px; color:var(--muted); font-size:.55rem; width:20px; height:16px; line-height:1; cursor:pointer; padding:0; }
+.btn-reorder:hover:not(:disabled) { background:var(--border); color:var(--text); }
+.btn-reorder:disabled { opacity:.25; cursor:default; }
+.spot-side { display:flex; flex-direction:column; align-items:center; gap:4px; flex-shrink:0; }
+.btn-spot-detail { background:transparent; border:none; cursor:pointer; font-size:.8rem; padding:2px; opacity:.7; }
+.btn-spot-detail:hover { opacity:1; }
+.spot-move-sel { background:var(--surface2); border:1px solid var(--border); border-radius:4px; color:var(--muted); font-size:.6rem; width:26px; padding:1px; outline:none; font-family:inherit; cursor:pointer; }
+
+/* ── DAY COLLAPSE ── */
+.day-hd { cursor:pointer; user-select:none; }
+.day-chevron { color:var(--muted); font-size:.7rem; width:12px; }
+.day-summary { padding:8px 14px; font-size:.72rem; color:var(--muted); cursor:pointer; border-top:1px dashed rgba(255,255,255,.05); }
+.day-card.collapsed .spots-list, .day-card.collapsed .add-spot-row { display:none; }
+
+/* ── ROUTE INFO ── */
+#route-info { position:absolute; bottom:16px; left:12px; z-index:10; background:rgba(13,17,23,.88); border:1px solid var(--border); border-radius:10px; padding:8px 12px; font-size:.68rem; color:var(--text); max-width:260px; max-height:180px; overflow-y:auto; display:none; }
+#route-info .ri-total { font-weight:700; color:var(--gold); margin-bottom:4px; }
+#route-info .ri-seg { color:var(--muted); line-height:1.6; }
+
+/* ── POI CARD (map click) ── */
+#poi-card { position:absolute; bottom:16px; left:50%; transform:translateX(-50%); z-index:20; background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:14px; width:300px; max-width:calc(100% - 24px); box-shadow:0 12px 40px rgba(0,0,0,.55); display:none; }
+#poi-card .pc-close { position:absolute; top:8px; right:10px; background:none; border:none; color:var(--muted); cursor:pointer; font-size:.9rem; }
+#poi-card .pc-name { font-weight:700; font-size:.9rem; margin-bottom:4px; padding-right:20px; }
+#poi-card .pc-meta { font-size:.7rem; color:var(--muted); line-height:1.6; margin-bottom:8px; }
+#poi-card .pc-photo { width:100%; height:110px; object-fit:cover; border-radius:8px; margin-bottom:8px; }
+#poi-card .pc-row { display:flex; gap:6px; }
+#poi-card select { flex:1; background:var(--surface2); border:1px solid var(--border); border-radius:6px; color:var(--text); font-size:.72rem; padding:6px; outline:none; font-family:inherit; }
+#poi-card .pc-add { background:linear-gradient(135deg,#f78166,#d4a843); color:#fff; border:none; border-radius:6px; padding:6px 14px; font-size:.72rem; font-weight:700; cursor:pointer; font-family:inherit; }
+
+/* ── PHOTO MODAL ── */
+.modal-mask { position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:500; display:none; align-items:center; justify-content:center; padding:16px; }
+.modal-mask.open { display:flex; }
+.photo-modal { background:var(--surface); border:1px solid var(--border); border-radius:14px; width:640px; max-width:100%; max-height:90vh; display:flex; flex-direction:column; overflow:hidden; }
+.pm-head { display:flex; align-items:center; justify-content:space-between; padding:12px 16px; border-bottom:1px solid var(--border); }
+.pm-title { font-weight:700; font-size:.9rem; }
+.pm-close { background:none; border:none; color:var(--muted); font-size:1rem; cursor:pointer; }
+.pm-tabs { display:flex; gap:6px; padding:10px 16px 0; }
+.pm-tab { background:var(--surface2); border:1px solid var(--border); border-radius:8px 8px 0 0; color:var(--muted); padding:6px 14px; font-size:.75rem; cursor:pointer; font-family:inherit; }
+.pm-tab.active { background:var(--border); color:var(--text); font-weight:700; }
+.pm-body { padding:12px 16px; overflow-y:auto; flex:1; }
+.pm-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(110px,1fr)); gap:8px; }
+.pm-cell { position:relative; }
+.pm-cell img { width:100%; height:90px; object-fit:cover; border-radius:8px; cursor:pointer; display:block; }
+.pm-cell .pm-del { position:absolute; top:4px; right:4px; background:rgba(0,0,0,.6); border:none; color:#fff; border-radius:50%; width:20px; height:20px; font-size:.65rem; cursor:pointer; }
+.pm-cell .pm-cap { font-size:.62rem; color:var(--muted); margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.pm-foot { padding:10px 16px; border-top:1px solid var(--border); display:flex; gap:8px; align-items:center; }
+.pm-upload-btn { background:linear-gradient(135deg,#f78166,#d4a843); color:#fff; border:none; border-radius:8px; padding:8px 16px; font-size:.75rem; font-weight:700; cursor:pointer; font-family:inherit; }
+.pm-hint { font-size:.65rem; color:var(--muted); }
+.pm-empty { text-align:center; color:var(--muted); font-size:.75rem; padding:30px 0; }
+
+/* ── LIGHTBOX ── */
+#lightbox { position:fixed; inset:0; background:rgba(0,0,0,.9); z-index:600; display:none; align-items:center; justify-content:center; cursor:zoom-out; }
+#lightbox.open { display:flex; }
+#lightbox img { max-width:94%; max-height:94%; border-radius:8px; }
+
 /* ── TOAST ── */
 .toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%) translateY(50px); background:var(--surface); border:1px solid var(--border); color:var(--text); padding:9px 18px; border-radius:20px; font-size:.8rem; opacity:0; transition:transform .3s,opacity .3s; z-index:999; pointer-events:none; white-space:nowrap; }
 .toast.show { transform:translateX(-50%) translateY(0); opacity:1; }
@@ -756,6 +1180,19 @@ nav {
   }
 
   .nav-title-input { font-size:.82rem; }
+
+  /* larger text & touch targets on mobile */
+  .spot-name-inp { font-size:.95rem; }
+  .spot-note, .spot-time, .spot-cost { font-size:.78rem; }
+  .day-pill { font-size:.72rem; }
+  .day-date, .day-cost { font-size:.85rem; }
+  .day-summary { font-size:.8rem; padding:10px 14px; }
+  .btn-reorder { width:28px; height:24px; font-size:.7rem; }
+  .btn-ic, .btn-map-day { padding:7px 11px; font-size:.78rem; }
+  .btn-spot-del, .btn-spot-detail { font-size:1rem; padding:6px; }
+  .spot-move-sel { width:34px; font-size:.7rem; }
+  .add-spot-inp { font-size:.9rem; }
+  .btn-add-spot { padding:8px 14px; font-size:.82rem; }
 }
 
 @media (min-width: 769px) {
@@ -806,6 +1243,8 @@ nav {
   <div id="itinerary-panel">
     <div class="toolbar">
       <button class="btn-add-day" onclick="addDay()">＋ 新增天數</button>
+      <button class="btn-share" onclick="toggleAllDays()">⬍ 展開/收合</button>
+      <button class="btn-share" onclick="location.href='poi.html?project='+(new URLSearchParams(location.search).get('project')||'main')">📁 文件</button>
       <button class="btn-share" onclick="copyShare()">🔗 複製分享連結</button>
     </div>
     <div id="days-container">
@@ -822,9 +1261,37 @@ nav {
     </div>
     <div id="map"></div>
     <div class="map-day-tabs" id="map-day-tabs"></div>
+    <div id="route-info"></div>
+    <div id="poi-card"></div>
     <button id="map-nav-btn" onclick="openNavigation()">🚗 Google Maps 導航</button>
   </div>
 </div>
+
+<!-- PHOTO MODAL -->
+<div class="modal-mask" id="photo-modal-mask" onclick="if(event.target===this)closePhotos()">
+  <div class="photo-modal">
+    <div class="pm-head">
+      <span class="pm-title" id="pm-title">照片</span>
+      <button class="pm-close" onclick="closePhotos()">✕</button>
+    </div>
+    <div class="pm-tabs">
+      <button class="pm-tab active" id="pm-tab-planning" onclick="switchPhotoTab('planning')">📋 規劃</button>
+      <button class="pm-tab" id="pm-tab-memory" onclick="switchPhotoTab('memory')">📸 回憶</button>
+    </div>
+    <div class="pm-body">
+      <div class="pm-grid" id="pm-grid"></div>
+      <div class="pm-empty" id="pm-empty" style="display:none">尚無照片，點下方按鈕上傳</div>
+    </div>
+    <div class="pm-foot">
+      <input type="file" id="pm-file" accept="image/*" multiple style="display:none" onchange="uploadPhotos(this.files)">
+      <button class="pm-upload-btn" onclick="document.getElementById('pm-file').click()">⬆ 上傳照片</button>
+      <span class="pm-hint" id="pm-hint">自動壓縮後上傳</span>
+    </div>
+  </div>
+</div>
+
+<!-- LIGHTBOX -->
+<div id="lightbox" onclick="this.classList.remove('open')"><img id="lightbox-img" src="" alt=""></div>
 
 <div class="toast" id="toast"></div>
 

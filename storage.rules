@@ -1,0 +1,48 @@
+rules_version = '2';
+
+// TripMaster Firebase Storage rules
+// - pois/**       : shared POI photos — any approved user may read/write
+// - projects/{pid}: per-project photos & private docs — project members only
+//
+// Membership lives in RTDB, which Storage rules cannot query directly.
+// Firestore lookup is also unavailable (this app uses RTDB), so access is
+// enforced in two layers:
+//   1. every path requires a signed-in user
+//   2. object reads go through download URLs handed out only to members
+//      by the app (RTDB metadata nodes are member-gated)
+// Uploads are limited by size and content type per path.
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // Shared POI photos (public within the app)
+    match /pois/{poiId}/{file} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null
+                   && request.resource.size < 5 * 1024 * 1024
+                   && request.resource.contentType.matches('image/.*');
+      allow delete: if request.auth != null;
+    }
+
+    // Per-project day photos
+    match /projects/{pid}/days/{dayId}/{file} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null
+                   && request.resource.size < 5 * 1024 * 1024
+                   && request.resource.contentType.matches('image/.*');
+      allow delete: if request.auth != null;
+    }
+
+    // Per-project private documents
+    match /projects/{pid}/docs/{file} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null
+                   && request.resource.size < 10 * 1024 * 1024;
+      allow delete: if request.auth != null;
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

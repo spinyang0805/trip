@@ -32,6 +32,34 @@
         ".read": "auth != null && (root.child('users').child(auth.uid).child('isAdmin').val() === true || root.child('projects').child($pid).child('ownerId').val() === auth.uid || root.child('projects').child($pid).child('members').child(auth.uid).child('status').val() === 'approved')",
         ".write": "auth != null && (root.child('users').child(auth.uid).child('isAdmin').val() === true || root.child('projects').child($pid).child('ownerId').val() === auth.uid || root.child('projects').child($pid).child('members').child(auth.uid).child('status').val() === 'approved')"
       }
+    },
+
+    "pois": {
+      ".read": "auth != null && (root.child('users').child(auth.uid).child('status').val() === 'approved' || root.child('users').child(auth.uid).child('isAdmin').val() === true)",
+      "$poiId": {
+        ".write": "auth != null && (root.child('users').child(auth.uid).child('status').val() === 'approved' || root.child('users').child(auth.uid).child('isAdmin').val() === true) && (newData.exists() || root.child('users').child(auth.uid).child('isAdmin').val() === true)"
+      }
+    },
+
+    "poisHistory": {
+      ".read": "auth != null && (root.child('users').child(auth.uid).child('status').val() === 'approved' || root.child('users').child(auth.uid).child('isAdmin').val() === true)",
+      "$poiId": {
+        ".write": "auth != null && (root.child('users').child(auth.uid).child('status').val() === 'approved' || root.child('users').child(auth.uid).child('isAdmin').val() === true)"
+      }
+    },
+
+    "photos": {
+      "$pid": {
+        ".read": "auth != null && (root.child('users').child(auth.uid).child('isAdmin').val() === true || root.child('projects').child($pid).child('ownerId').val() === auth.uid || root.child('projects').child($pid).child('members').child(auth.uid).child('status').val() === 'approved')",
+        ".write": "auth != null && (root.child('users').child(auth.uid).child('isAdmin').val() === true || root.child('projects').child($pid).child('ownerId').val() === auth.uid || root.child('projects').child($pid).child('members').child(auth.uid).child('status').val() === 'approved')"
+      }
+    },
+
+    "docs": {
+      "$pid": {
+        ".read": "auth != null && (root.child('users').child(auth.uid).child('isAdmin').val() === true || root.child('projects').child($pid).child('ownerId').val() === auth.uid || root.child('projects').child($pid).child('members').child(auth.uid).child('status').val() === 'approved')",
+        ".write": "auth != null && (root.child('users').child(auth.uid).child('isAdmin').val() === true || root.child('projects').child($pid).child('ownerId').val() === auth.uid || root.child('projects').child($pid).child('members').child(auth.uid).child('status').val() === 'approved')"
+      }
     }
   }
 }
