@@ -1,7 +1,0 @@
-{
-  "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"cd \\\"D:/個人資料/Ttrip Sechedule/旅遊規畫網站/trip\\\" && gh api repos/spinyang0805/trip/pages 2>&1; ls .github 2>&1\",\"description\":\"Check if GitHub Pages is enabled for the repo\"}",
-  "error": "Exit code 2\n{\"url\":\"https://api.github.com/repos/spinyang0805/trip/pages\",\"status\":\"built\",\"cname\":null,\"custom_404\":false,\"html_url\":\"https://spinyang0805.github.io/trip/\",\"build_type\":\"legacy\",\"source\":{\"branch\":\"main\",\"path\":\"/\"},\"public\":true,\"protected_domain_state\":null,\"pending_domain_unverified_at\":null,\"https_enforced\":true}ls: cannot access '.github': No such file or directory",
-  "timestamp": "2026-07-16T02:56:06.366Z",
-  "retry_count": 1
-}
