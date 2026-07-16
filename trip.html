@@ -238,9 +238,21 @@ function initMapReal() {
   });
   directionsService = new google.maps.DirectionsService();
   renderAll();
+  kickMapResize();
 }
 window.__onMapsReady = initMapReal;
 if (window.__mapsReady) initMapReal();
+
+// Tiles stall if the container's layout shifts right after init;
+// trigger a resize after layout settles so the tile pipeline wakes up.
+function kickMapResize() {
+  if (!map) return;
+  setTimeout(() => {
+    const c = map.getCenter();
+    google.maps.event.trigger(map, 'resize');
+    if (c) map.setCenter(c);
+  }, 400);
+}
 
 function clearMap() {
   allMarkers.forEach(m => m.setMap(null));
@@ -504,6 +516,7 @@ window.toggleMap = function() {
     panel.classList.add('map-open');
     itinerary.classList.add('map-open');
     btn.textContent = '📋 行程';
+    kickMapResize();
     if (activeDay) showDayOnMap(activeDay);
   } else {
     panel.classList.remove('map-open');
