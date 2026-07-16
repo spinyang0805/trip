@@ -151,11 +151,14 @@ function renderAll() {
   }).join('');
 
   renderMapTabs(dayKeys);
-  bindDrag();
   updateBudgetBar();
 
-  if (!activeDay || !tripData.days[activeDay]) activeDay = dayKeys[0];
-  if (map) showDayOnMap(activeDay);
+  if (visibleDays.size === 0 && dayKeys.length && !renderAll._userHidAll) {
+    visibleDays.add(dayKeys[0]);
+    activeDay = dayKeys[0];
+  }
+  if (activeDay && !tripData.days[activeDay]) activeDay = [...visibleDays][0] || null;
+  if (map) drawVisibleDays();
 }
 
 // ── SPOT RENDER ───────────────────────────────
@@ -183,13 +186,9 @@ function renderSpot(dayId, sp, i, dayColor, total) {
   const moveOptions = dayKeys.filter(k => k !== dayId)
     .map(k => `<option value="${k}">移至 Day ${dayKeys.indexOf(k)+1}</option>`).join('');
   return `
-  <li class="spot-item" draggable="true" data-spot="${sp.id}" data-day="${dayId}">
+  <li class="spot-item" data-spot="${sp.id}" data-day="${dayId}">
     <div class="spot-left">
       <div class="spot-num" style="background:${dayColor}">${i+1}</div>
-      <div class="spot-reorder">
-        <button class="btn-reorder" onclick="moveSpot('${dayId}','${sp.id}',-1)" ${i===0?'disabled':''}>▲</button>
-        <button class="btn-reorder" onclick="moveSpot('${dayId}','${sp.id}',1)" ${isLast?'disabled':''}>▼</button>
-      </div>
       ${!isLast ? `<div class="spot-line" style="background:${dayColor}"></div>` : ''}
     </div>
     <div class="spot-type-icon" style="background:${t.color}22;color:${t.color}" title="${t.label}">${t.icon}</div>
@@ -237,10 +236,10 @@ function renderMapTabs(dayKeys) {
   if (!map || dayKeys.length === 0) { ct.innerHTML = ''; return; }
   ct.innerHTML = dayKeys.map((id, i) => {
     const c = DAY_COLORS[i % DAY_COLORS.length];
-    const active = id === activeDay;
-    return `<button class="map-tab ${active?'active':''}"
-      style="${active ? `background:${c};border-color:${c}` : `border-color:${c};color:${c}`}"
-      onclick="showDayOnMap('${id}')">Day ${i+1}</button>`;
+    const on = visibleDays.has(id);
+    return `<button class="map-tab ${on?'active':''}" title="${on?'點擊隱藏':'點擊顯示'}"
+      style="${on ? `background:${c};border-color:${c}` : `border-color:${c};color:${c};opacity:.75`}"
+      onclick="toggleDayOnMap('${id}')">Day ${i+1}</button>`;
   }).join('');
 }
 
@@ -380,62 +379,106 @@ function kickMapResize() {
   [1500, 4000, 7000, 10000, 14000, 18000].forEach(t => setTimeout(nudge, t));
 }
 
+let fallbackLines = [];
+let visibleDays = new Set();
+
 function clearMap() {
   allMarkers.forEach(m => m.setMap(null));
   allMarkers = [];
   Object.values(renderers).forEach(arr => arr.forEach(r => r.setMap(null)));
   renderers = {};
+  fallbackLines.forEach(l => l.setMap(null));
+  fallbackLines = [];
 }
 
+function haversineKm(a, b) {
+  const R = 6371, toRad = d => d * Math.PI / 180;
+  const s = Math.sin(toRad(b.lat - a.lat) / 2) ** 2 +
+    Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(toRad(b.lng - a.lng) / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(s));
+}
+
+// show a day (used by day-card buttons and after edits): ensure visible
 window.showDayOnMap = showDayOnMap;
 function showDayOnMap(dayId) {
-  if (!map) return;
+  if (!map || !tripData.days?.[dayId]) return;
+  visibleDays.add(dayId);
   activeDay = dayId;
+  drawVisibleDays();
+}
+
+// map tab click: toggle a day's route on/off (multiple days can overlay)
+window.toggleDayOnMap = function(dayId) {
+  if (visibleDays.has(dayId)) {
+    visibleDays.delete(dayId);
+    if (activeDay === dayId) activeDay = [...visibleDays].pop() || null;
+  } else {
+    visibleDays.add(dayId);
+    activeDay = dayId;
+  }
+  renderAll._userHidAll = visibleDays.size === 0;
+  drawVisibleDays();
+};
+
+function drawVisibleDays() {
+  if (!map) return;
   clearMap();
-  routeStats[dayId] = {};
   const ri = document.getElementById('route-info');
   if (ri) ri.style.display = 'none';
 
   const dayKeys = Object.keys(tripData.days || {}).sort();
+  [...visibleDays].forEach(d => { if (!tripData.days?.[d]) visibleDays.delete(d); });
   renderMapTabs(dayKeys);
 
-  const day = tripData.days[dayId];
-  if (!day) return;
-
-  const spots = getSpotsArray(day).filter(s => s.lat && s.lng);
-  const navBtn = document.getElementById('map-nav-btn');
-
-  if (spots.length === 0) { navBtn.style.display = 'none'; return; }
-  navBtn.style.display = 'flex';
-
-  const idx   = dayKeys.indexOf(dayId);
-  const useAvoidTolls = spots.some(s => s.avoidToll);
-
-  if (spots.length === 1) {
-    addMarker(spots[0], 1, DAY_COLORS[idx % DAY_COLORS.length], SPOT_TYPES[spots[0].type]?.icon || '📍');
-    map.setCenter({ lat: spots[0].lat, lng: spots[0].lng });
-    map.setZoom(14);
-    return;
-  }
-
-  // Draw one segment per consecutive pair with unique color
-  renderers[dayId] = [];
   const bounds = new google.maps.LatLngBounds();
+  let markerCount = 0;
+  dayKeys.forEach(dayId => {
+    if (visibleDays.has(dayId)) markerCount += drawDay(dayId, bounds);
+  });
+
+  const navBtn = document.getElementById('map-nav-btn');
+  navBtn.style.display = (activeDay && markerCount) ? 'flex' : 'none';
+
+  if (markerCount === 1) {
+    map.setCenter(allMarkers[0].getPosition());
+    map.setZoom(14);
+  } else if (markerCount > 1) {
+    map.fitBounds(bounds, { padding: 60 });
+  }
+  if (activeDay) renderRouteInfo(activeDay);
+}
+
+function drawDay(dayId, bounds) {
+  const day = tripData.days[dayId];
+  if (!day) return 0;
+  const dayKeys = Object.keys(tripData.days).sort();
+  const idx = dayKeys.indexOf(dayId);
+  const color = DAY_COLORS[idx % DAY_COLORS.length];
+  const spots = getSpotsArray(day).filter(s => s.lat && s.lng);
+  if (spots.length === 0) return 0;
+
+  routeStats[dayId] = {};
+  const useAvoidTolls = spots.some(s => s.avoidToll);
+  renderers[dayId] = [];
 
   spots.forEach((sp, i) => {
-    const segColor = SEGMENT_COLORS[i % SEGMENT_COLORS.length];
     bounds.extend({ lat: sp.lat, lng: sp.lng });
-    addMarker(sp, i+1, segColor, SPOT_TYPES[sp.type]?.icon || '📍');
+    addMarker(sp, i+1, color, SPOT_TYPES[sp.type]?.icon || '📍');
 
     if (i < spots.length - 1) {
       const next = spots[i+1];
+      const distKm = haversineKm(sp, next);
+      if (distKm > 300) {
+        showToast(`Day ${idx+1} 第 ${i+1}→${i+2} 段距離異常（${Math.round(distKm)}km），已略過，請檢查景點定位`);
+        return;
+      }
       const renderer = new google.maps.DirectionsRenderer({
         suppressMarkers: true,
         polylineOptions: {
-          strokeColor: segColor,
+          strokeColor: color,
           strokeWeight: 5,
           strokeOpacity: 0.85,
-          icons: [{ icon: { path: google.maps.SymbolPath.FORWARD_CLOSED_ARROW, scale: 3, fillColor: segColor, fillOpacity: 1, strokeColor: '#fff', strokeWeight: 1 }, offset: '50%' }]
+          icons: [{ icon: { path: google.maps.SymbolPath.FORWARD_CLOSED_ARROW, scale: 3, fillColor: color, fillOpacity: 1, strokeColor: '#fff', strokeWeight: 1 }, offset: '50%' }]
         }
       });
       renderer.setMap(map);
@@ -460,18 +503,16 @@ function showDayOnMap(dayId) {
             };
             if (activeDay === dayId) renderRouteInfo(dayId);
           }
-        } else {
-          // fallback polyline
-          new google.maps.Polyline({
+        } else if (visibleDays.has(dayId)) {
+          fallbackLines.push(new google.maps.Polyline({
             path: [{ lat: sp.lat, lng: sp.lng }, { lat: next.lat, lng: next.lng }],
-            strokeColor: segColor, strokeWeight: 4, strokeOpacity: .7, map
-          });
+            strokeColor: color, strokeWeight: 4, strokeOpacity: .7, map
+          }));
         }
       });
     }
   });
-
-  map.fitBounds(bounds, { padding: 60 });
+  return spots.length;
 }
 
 const SEGMENT_COLORS = ['#ff6b6b','#ffd93d','#6bcb77','#4d96ff','#ff922b','#cc5de8','#20c997','#f06595','#a9e34b','#74c0fc'];
@@ -737,31 +778,94 @@ function updateBudgetBar() {
   document.getElementById('budget-bar-fill').style.background = pct > 90 ? '#f85149' : 'linear-gradient(90deg,#4a7c59,#d4a843)';
 }
 
-// ── DRAG & DROP ───────────────────────────────
-function bindDrag() {
-  document.querySelectorAll('.spot-item').forEach(item => {
-    item.addEventListener('dragstart', e => { dragSrc = item; item.classList.add('dragging'); e.dataTransfer.effectAllowed = 'move'; });
-    item.addEventListener('dragend',   () => { item.classList.remove('dragging'); document.querySelectorAll('.spot-item').forEach(i => i.classList.remove('drag-over')); });
-    item.addEventListener('dragover',  e => { e.preventDefault(); if (item !== dragSrc) item.classList.add('drag-over'); });
-    item.addEventListener('dragleave', () => item.classList.remove('drag-over'));
-    item.addEventListener('drop', e => {
-      e.stopPropagation(); item.classList.remove('drag-over');
-      if (!dragSrc || dragSrc === item || dragSrc.dataset.day !== item.dataset.day) return;
-      const dayId = dragSrc.dataset.day;
-      const spots = tripData.days[dayId].spots;
-      const keys  = Object.keys(spots).sort();
-      const si = keys.indexOf(dragSrc.dataset.spot);
-      const di = keys.indexOf(item.dataset.spot);
-      keys.splice(di, 0, keys.splice(si, 1)[0]);
-      const ns = {};
-      keys.forEach((k,i) => { ns['spot_' + String(i).padStart(8,'0')] = spots[k]; });
-      tripData.days[dayId].spots = ns;
+// ── LONG-PRESS DRAG REORDER (touch + mouse) ───
+// Hold a card ~400ms to lift it, drag vertically, release to drop.
+// Moving >10px before the hold completes is treated as scrolling.
+function initSpotDrag() {
+  const container = document.getElementById('days-container');
+  let blockScroll = null;
+
+  container.addEventListener('pointerdown', e => {
+    if (e.button !== undefined && e.button !== 0 && e.pointerType === 'mouse') return;
+    if (['INPUT','SELECT','TEXTAREA','BUTTON','OPTION','A','LABEL'].includes(e.target.tagName)) return;
+    const item = e.target.closest('.spot-item');
+    if (!item) return;
+
+    const dayId = item.dataset.day, spotId = item.dataset.spot;
+    const startX = e.clientX, startY = e.clientY;
+    let active = false;
+
+    const timer = setTimeout(() => {
+      active = true;
+      navigator.vibrate?.(30);
+      item.classList.add('touch-dragging');
+      document.body.classList.add('no-select');
+      blockScroll = ev => ev.preventDefault();
+      document.addEventListener('touchmove', blockScroll, { passive: false });
+    }, 400);
+
+    const list = item.parentElement;
+    const clearOver = () => list.querySelectorAll('.spot-item').forEach(s => s.classList.remove('drag-over'));
+
+    const onMove = ev => {
+      if (!active) {
+        if (Math.abs(ev.clientY - startY) > 10 || Math.abs(ev.clientX - startX) > 10) cleanup();
+        return;
+      }
+      item.style.transform = `translateY(${ev.clientY - startY}px) scale(1.02)`;
+      clearOver();
+      const over = [...list.querySelectorAll('.spot-item')].find(s => {
+        if (s === item) return false;
+        const r = s.getBoundingClientRect();
+        return ev.clientY > r.top && ev.clientY < r.bottom;
+      });
+      if (over) over.classList.add('drag-over');
+    };
+
+    const onUp = ev => {
+      const wasActive = active;
+      const dropY = ev.clientY;
+      cleanup();
+      if (!wasActive) return;
+      const spots = tripData.days[dayId]?.spots;
+      if (!spots) return;
+      const keys = Object.keys(spots).sort();
+      const from = keys.indexOf(spotId);
+      if (from < 0) return;
+      // insertion index = number of other cards whose midpoint is above the drop point
+      const others = [...list.querySelectorAll('.spot-item')].filter(s => s !== item);
+      let to = others.filter(s => {
+        const r = s.getBoundingClientRect();
+        return (r.top + r.height / 2) < dropY;
+      }).length;
+      if (to === from) return;
+      keys.splice(from, 1);
+      keys.splice(to, 0, spotId);
+      rekeySpots(dayId, keys);
       save();
       showToast('順序已更新 ✓');
-      setTimeout(() => { if (activeDay === dayId) showDayOnMap(dayId); }, 400);
-    });
+      setTimeout(() => showDayOnMap(dayId), 300);
+    };
+
+    function cleanup() {
+      clearTimeout(timer);
+      active = false;
+      item.classList.remove('touch-dragging');
+      item.style.transform = '';
+      document.body.classList.remove('no-select');
+      clearOver();
+      if (blockScroll) { document.removeEventListener('touchmove', blockScroll); blockScroll = null; }
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+      document.removeEventListener('pointercancel', onUp);
+    }
+
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onUp);
+    document.addEventListener('pointercancel', onUp);
   });
 }
+initSpotDrag();
 
 // ── MOBILE MAP TOGGLE ─────────────────────────
 window.toggleMap = function() {
@@ -921,7 +1025,27 @@ window.openPoiDetail = async function(dayId, spotId) {
     tripData.days[dayId].spots[spotId].poiId = poiId;
     save();
   }
-  location.href = `poi.html?id=${poiId}&project=${projectId}`;
+  const url = `poi.html?id=${poiId}&project=${projectId}`;
+  if (window.matchMedia('(min-width: 769px)').matches) {
+    // desktop: show the detail inline in the right panel
+    document.getElementById('poi-frame').src = url + '&embed=1';
+    const psPoi = document.getElementById('ps-poi');
+    const psOpen = document.getElementById('ps-open');
+    psPoi.style.display = '';
+    psOpen.style.display = '';
+    psOpen.href = url;
+    switchPanel('poi');
+  } else {
+    location.href = url;
+  }
+};
+
+window.switchPanel = function(which) {
+  const panel = document.getElementById('map-panel');
+  panel.classList.toggle('show-poi', which === 'poi');
+  document.getElementById('ps-map').classList.toggle('active', which === 'map');
+  document.getElementById('ps-poi').classList.toggle('active', which === 'poi');
+  if (which === 'map') kickMapResize();
 };
 
 // ── SHARE ─────────────────────────────────────
@@ -1124,11 +1248,16 @@ nav {
 #map-nav-btn { position:absolute; bottom:16px; right:16px; background:linear-gradient(135deg,#2e6da4,#1a6b8a); color:#fff; border:none; border-radius:10px; padding:10px 16px; font-size:.8rem; font-family:inherit; font-weight:600; cursor:pointer; box-shadow:0 4px 16px rgba(46,109,164,.5); z-index:10; display:none; align-items:center; gap:6px; transition:transform .15s; }
 #map-nav-btn:hover { transform:translateY(-2px); }
 
-/* ── REORDER / SPOT SIDE ── */
-.spot-reorder { display:flex; flex-direction:column; gap:2px; margin-top:4px; }
-.btn-reorder { background:var(--surface2); border:1px solid var(--border); border-radius:4px; color:var(--muted); font-size:.55rem; width:20px; height:16px; line-height:1; cursor:pointer; padding:0; }
-.btn-reorder:hover:not(:disabled) { background:var(--border); color:var(--text); }
-.btn-reorder:disabled { opacity:.25; cursor:default; }
+/* ── PANEL SWITCH (map ⇄ poi detail) ── */
+.panel-switch { position:absolute; top:12px; right:12px; z-index:30; display:flex; gap:4px; }
+.ps-btn { background:rgba(13,17,23,.88); border:1px solid var(--border); border-radius:8px; color:var(--muted); padding:5px 12px; font-size:.72rem; font-family:inherit; font-weight:600; cursor:pointer; text-decoration:none; box-shadow:0 2px 8px rgba(0,0,0,.4); }
+.ps-btn.active { background:linear-gradient(135deg,#f78166,#d4a843); border-color:transparent; color:#fff; }
+#poi-frame { display:none; position:absolute; inset:0; width:100%; height:100%; border:none; background:var(--night); z-index:25; }
+#map-panel.show-poi #poi-frame { display:block; }
+
+/* ── LONG-PRESS DRAG / SPOT SIDE ── */
+.spot-item.touch-dragging { position:relative; z-index:50; background:var(--surface2); box-shadow:0 10px 28px rgba(0,0,0,.55); border-radius:8px; transition:none; }
+body.no-select { user-select:none; -webkit-user-select:none; }
 .spot-side { display:flex; flex-direction:column; align-items:center; gap:4px; flex-shrink:0; }
 .btn-spot-detail { background:transparent; border:none; cursor:pointer; font-size:.8rem; padding:2px; opacity:.7; }
 .btn-spot-detail:hover { opacity:1; }
@@ -1219,7 +1348,6 @@ nav {
   .day-pill { font-size:.72rem; }
   .day-date, .day-cost { font-size:.85rem; }
   .day-summary { font-size:.8rem; padding:10px 14px; }
-  .btn-reorder { width:28px; height:24px; font-size:.7rem; }
   .btn-ic, .btn-map-day { padding:7px 11px; font-size:.78rem; }
   .btn-spot-del, .btn-spot-detail { font-size:1rem; padding:6px; }
   .spot-move-sel { width:34px; font-size:.7rem; }
@@ -1296,6 +1424,12 @@ nav {
     <div id="route-info"></div>
     <div id="poi-card"></div>
     <button id="map-nav-btn" onclick="openNavigation()">🚗 Google Maps 導航</button>
+    <iframe id="poi-frame" title="景點詳情"></iframe>
+    <div class="panel-switch" id="panel-switch">
+      <button class="ps-btn active" id="ps-map" onclick="switchPanel('map')">🗺 地圖</button>
+      <button class="ps-btn" id="ps-poi" onclick="switchPanel('poi')" style="display:none">📖 景點</button>
+      <a class="ps-btn" id="ps-open" href="#" target="_blank" style="display:none" title="開新頁">↗</a>
+    </div>
   </div>
 </div>
 

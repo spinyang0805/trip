@@ -32,6 +32,8 @@ const storage = getStorage(app);
 const params    = new URLSearchParams(location.search);
 const poiId     = params.get('id');          // null = project docs mode
 const projectId = params.get('project');
+const isEmbed   = params.get('embed') === '1';
+if (isEmbed) document.body.classList.add('embed');
 
 const SPOT_TYPES = {
   attraction:'🗺️ 景點', meal:'🍜 餐廳', snack:'🍡 小吃', transport:'🚗 交通',
@@ -90,6 +92,16 @@ function loadPoi() {
     if (document.activeElement !== art) art.value = poiData.article || '';
     document.getElementById('poi-meta').textContent =
       `被 ${poiData.usedByCount || 0} 個行程使用｜最後編輯 ${poiData.updatedAt ? new Date(poiData.updatedAt).toLocaleString('zh-TW') : '—'}`;
+    const ratingEl = document.getElementById('poi-rating');
+    if (poiData.rating) {
+      const countStr = (poiData.userRatingsTotal || 0).toLocaleString('zh-TW');
+      const updatedStr = poiData.ratingUpdatedAt ? new Date(poiData.ratingUpdatedAt).toLocaleDateString('zh-TW') : '';
+      ratingEl.innerHTML = `<span style="color:var(--gold);font-weight:700">⭐ ${poiData.rating}</span>（${countStr} 則評論）` +
+        (updatedStr ? ` <span style="color:var(--muted)">更新於 ${updatedStr}</span>` : '');
+      ratingEl.style.display = 'block';
+    } else {
+      ratingEl.style.display = 'none';
+    }
     renderPoiPhotos();
     renderMiniMap();
   });
@@ -105,6 +117,51 @@ window.savePoiField = function(field, value) {
 window.savePoiLinks = function(value) {
   const links = value.split('\n').map(s => s.trim()).filter(Boolean);
   update(ref(db, `pois/${poiId}`), { links, updatedBy: currentUser.uid, updatedAt: Date.now() });
+};
+
+// ── GOOGLE PLACE LOOKUP (name → coords + rating) ─
+window.searchGooglePlace = function() {
+  if (!poiId) return;
+  const name = document.getElementById('poi-name').value.trim();
+  if (!name) return;
+  if (!window.google?.maps?.places) { showToast('Google 地圖尚未載入完成'); return; }
+
+  const service = new google.maps.places.PlacesService(document.createElement('div'));
+  service.findPlaceFromQuery({ query: name, fields: ['place_id'] }, (results, status) => {
+    if (status !== google.maps.places.PlacesServiceStatus.OK || !results?.length) {
+      showToast('Google 找不到此名稱');
+      return;
+    }
+    service.getDetails({
+      placeId: results[0].place_id,
+      fields: ['name', 'geometry', 'place_id', 'formatted_address', 'rating', 'user_ratings_total']
+    }, async (place, detStatus) => {
+      if (detStatus !== google.maps.places.PlacesServiceStatus.OK || !place?.geometry) {
+        showToast('Google 找不到此名稱');
+        return;
+      }
+      const lat = place.geometry.location.lat();
+      const lng = place.geometry.location.lng();
+      await update(ref(db, `pois/${poiId}`), {
+        lat, lng,
+        address: place.formatted_address || '',
+        placeId: place.place_id || null,
+        rating: place.rating !== undefined ? place.rating : null,
+        userRatingsTotal: place.user_ratings_total !== undefined ? place.user_ratings_total : null,
+        ratingUpdatedAt: Date.now(),
+        updatedBy: currentUser.uid,
+        updatedAt: Date.now()
+      });
+      showToast('已更新位置與評分 ⭐');
+      if (miniMap) {
+        miniMap.setCenter({ lat, lng });
+        new google.maps.Marker({ position: { lat, lng }, map: miniMap });
+      } else {
+        if (poiData) { poiData.lat = lat; poiData.lng = lng; }
+        renderMiniMap();
+      }
+    });
+  });
 };
 
 // article: debounce autosave + keep last 10 versions
@@ -250,10 +307,11 @@ function renderDocs() {
       groups.get('').map(([id, d]) => docRowHtml(id, d)).join('');
     groups.delete('');
   }
+  const linkTarget = isEmbed ? ' target="_top"' : '';
   [...groups.entries()]
     .sort((a, b) => (poiNames[a[0]] || '').localeCompare(poiNames[b[0]] || '', 'zh-TW'))
     .forEach(([pid, items]) => {
-      html += `<div class="doc-group-hd">📍 <a href="poi.html?id=${pid}&project=${projectId}" class="doc-group-link">${escHtml(poiNames[pid] || '未知景點')}</a></div>` +
+      html += `<div class="doc-group-hd">📍 <a href="poi.html?id=${pid}&project=${projectId}" class="doc-group-link"${linkTarget}>${escHtml(poiNames[pid] || '未知景點')}</a></div>` +
         items.map(([id, d]) => docRowHtml(id, d)).join('');
     });
   list.innerHTML = html;
@@ -349,6 +407,10 @@ nav { background:rgba(13,17,23,.96); border-bottom:1px solid var(--border); padd
 .wrap { max-width:760px; margin:0 auto; padding:20px 16px 60px; display:flex; flex-direction:column; gap:16px; }
 h1 { font-family:'Playfair Display','Noto Sans TC',serif; font-size:1.4rem; }
 .poi-meta { font-size:.7rem; color:var(--muted); }
+#poi-rating { margin-top:2px; }
+
+body.embed nav { display:none; }
+body.embed .wrap { padding:12px 12px; }
 
 .card { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:16px; }
 .card h2 { font-size:.85rem; margin-bottom:10px; color:var(--gold); }
@@ -411,6 +473,7 @@ h1 { font-family:'Playfair Display','Noto Sans TC',serif; font-size:1.4rem; }
   <div>
     <h1 id="page-title">載入中…</h1>
     <div class="poi-meta" id="poi-meta"></div>
+    <div class="poi-meta" id="poi-rating" style="display:none"></div>
   </div>
 
   <!-- POI SECTION -->
@@ -420,7 +483,12 @@ h1 { font-family:'Playfair Display','Noto Sans TC',serif; font-size:1.4rem; }
       <div class="field-row">
         <div class="field">
           <label>名稱</label>
-          <input id="poi-name" onchange="savePoiField('name', this.value)">
+          <div style="display:flex;gap:6px">
+            <input id="poi-name" style="flex:1" onchange="savePoiField('name', this.value)"
+              onkeydown="if(event.key==='Enter'){event.preventDefault();searchGooglePlace();}">
+            <button type="button" onclick="searchGooglePlace()" title="用 Google 查詢座標與評分"
+              style="flex:0 0 auto;background:var(--surface2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.9rem;padding:0 12px;cursor:pointer">🔍</button>
+          </div>
         </div>
         <div class="field" style="max-width:140px">
           <label>分類</label>
@@ -477,6 +545,6 @@ h1 { font-family:'Playfair Display','Noto Sans TC',serif; font-size:1.4rem; }
 <div id="lightbox" onclick="this.classList.remove('open')"><img id="lightbox-img" src="" alt=""></div>
 <div class="toast" id="toast"></div>
 
-<script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyC-QgKIKtZkmWIOXawmGBHVci4kKJOF7W0&callback=initMap&loading=async" async defer></script>
+<script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyC-QgKIKtZkmWIOXawmGBHVci4kKJOF7W0&callback=initMap&loading=async&libraries=places" async defer></script>
 </body>
 </html>
