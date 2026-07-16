@@ -192,12 +192,35 @@ window.deletePoiPhoto = async function(phId) {
 
 // ── PRIVATE DOCS (project members only) ───────
 let docsCache = {};
+let poiNames = {};   // poiId -> name (for grouping in project folder mode)
 
 function loadDocs() {
   onValue(ref(db, `docs/${projectId}`), snap => {
     docsCache = snap.val() || {};
     renderDocs();
   });
+  if (!poiId) {
+    onValue(ref(db, 'pois'), snap => {
+      const pois = snap.val() || {};
+      poiNames = {};
+      Object.entries(pois).forEach(([id, p]) => { poiNames[id] = p.name || '未命名景點'; });
+      renderDocs();
+    });
+  }
+}
+
+function docRowHtml(id, d) {
+  const canDel = d.uploadedBy === currentUser?.uid || currentUd?.isAdmin;
+  const icon = d.mime?.includes('pdf') ? '📄' : d.mime?.startsWith('image/') ? '🖼️' : '📎';
+  const size = d.size > 1048576 ? (d.size/1048576).toFixed(1)+' MB' : Math.round(d.size/1024)+' KB';
+  return `<div class="doc-row">
+    <span class="doc-icon">${icon}</span>
+    <div class="doc-info">
+      <a href="${d.url}" target="_blank" class="doc-name">${escHtml(d.fileName)}</a>
+      <div class="doc-meta">${size}｜${escHtml(d.uploaderName || '')}｜${new Date(d.uploadedAt).toLocaleDateString('zh-TW')}</div>
+    </div>
+    ${canDel ? `<button class="doc-del" onclick="deleteDoc('${id}')">🗑</button>` : ''}
+  </div>`;
 }
 
 function renderDocs() {
@@ -206,20 +229,34 @@ function renderDocs() {
     .filter(([, d]) => poiId ? d.spotPoiId === poiId : true)
     .sort((a, b) => b[1].uploadedAt - a[1].uploadedAt);
   document.getElementById('docs-empty').style.display = entries.length ? 'none' : 'block';
-  list.innerHTML = entries.map(([id, d]) => {
-    const canDel = d.uploadedBy === currentUser?.uid || currentUd?.isAdmin;
-    const icon = d.mime?.includes('pdf') ? '📄' : d.mime?.startsWith('image/') ? '🖼️' : '📎';
-    const size = d.size > 1048576 ? (d.size/1048576).toFixed(1)+' MB' : Math.round(d.size/1024)+' KB';
-    const scope = !poiId && d.spotPoiId ? `<span class="doc-scope">景點文件</span>` : '';
-    return `<div class="doc-row">
-      <span class="doc-icon">${icon}</span>
-      <div class="doc-info">
-        <a href="${d.url}" target="_blank" class="doc-name">${escHtml(d.fileName)}</a>
-        <div class="doc-meta">${size}｜${escHtml(d.uploaderName || '')}｜${new Date(d.uploadedAt).toLocaleDateString('zh-TW')} ${scope}</div>
-      </div>
-      ${canDel ? `<button class="doc-del" onclick="deleteDoc('${id}')">🗑</button>` : ''}
-    </div>`;
-  }).join('');
+
+  if (poiId) {
+    // POI detail mode: flat list, already filtered to this POI
+    list.innerHTML = entries.map(([id, d]) => docRowHtml(id, d)).join('');
+    return;
+  }
+
+  // Project folder mode: group by POI
+  const groups = new Map();   // key: poiId or '' (project-level)
+  entries.forEach(([id, d]) => {
+    const key = d.spotPoiId || '';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push([id, d]);
+  });
+
+  let html = '';
+  if (groups.has('')) {
+    html += `<div class="doc-group-hd">📁 專案文件</div>` +
+      groups.get('').map(([id, d]) => docRowHtml(id, d)).join('');
+    groups.delete('');
+  }
+  [...groups.entries()]
+    .sort((a, b) => (poiNames[a[0]] || '').localeCompare(poiNames[b[0]] || '', 'zh-TW'))
+    .forEach(([pid, items]) => {
+      html += `<div class="doc-group-hd">📍 <a href="poi.html?id=${pid}&project=${projectId}" class="doc-group-link">${escHtml(poiNames[pid] || '未知景點')}</a></div>` +
+        items.map(([id, d]) => docRowHtml(id, d)).join('');
+    });
+  list.innerHTML = html;
 }
 
 window.uploadDocs = async function(files) {
@@ -343,6 +380,10 @@ h1 { font-family:'Playfair Display','Noto Sans TC',serif; font-size:1.4rem; }
 .doc-name:hover { color:var(--accent); }
 .doc-meta { font-size:.62rem; color:var(--muted); margin-top:2px; }
 .doc-scope { color:var(--gold); }
+.doc-group-hd { font-size:.75rem; font-weight:700; color:var(--gold); margin:14px 0 4px; padding-bottom:4px; border-bottom:1px solid rgba(255,255,255,.08); }
+.doc-group-hd:first-child { margin-top:0; }
+.doc-group-link { color:var(--gold); text-decoration:none; }
+.doc-group-link:hover { color:var(--accent); text-decoration:underline; }
 .doc-del { background:none; border:none; color:var(--muted); cursor:pointer; font-size:.85rem; }
 .doc-del:hover { color:#f85149; }
 
