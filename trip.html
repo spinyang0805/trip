@@ -362,31 +362,20 @@ window.addSpotFromCard = function() {
 window.__onMapsReady = initMapReal;
 if (window.__mapsReady) initMapReal();
 
-// Tiles stall if the container's layout shifts right after init;
-// keep kicking a resize until the map reports tiles actually loaded.
-let tilesLoaded = false;
+// Tiles stall if the container's layout shifts right after init.
+// The modern Maps API ignores the legacy 'resize' trigger and its
+// 'tilesloaded' event fires even while the basemap is stuck, so the
+// only reliable wake-up is an actual container size change — nudge
+// the width a few times unconditionally (visually imperceptible).
 function kickMapResize() {
   if (!map) return;
-  if (!kickMapResize._bound) {
-    kickMapResize._bound = true;
-    map.addListener('tilesloaded', () => { tilesLoaded = true; });
-  }
-  let attempts = 0;
-  const kick = () => {
-    if (tilesLoaded || !map || attempts >= 6) return;
-    attempts++;
-    // an actual container size change is the only reliable wake-up:
-    // the modern Maps API ignores the legacy 'resize' trigger
+  const nudge = () => {
     const el = document.getElementById('map');
+    if (!el) return;
     el.style.width = 'calc(100% - 1px)';
-    setTimeout(() => {
-      el.style.width = '';
-      const c = map.getCenter();
-      if (c) map.setCenter(c);
-    }, 80);
-    setTimeout(kick, 600 * attempts);
+    setTimeout(() => { el.style.width = ''; }, 120);
   };
-  setTimeout(kick, 300);
+  [600, 2200, 5000].forEach(t => setTimeout(nudge, t));
 }
 
 function clearMap() {
