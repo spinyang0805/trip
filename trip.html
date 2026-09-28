@@ -126,19 +126,27 @@ function loadTrip() {
 
 // 使用者正在行程欄位輸入時先不重畫(重畫會換掉 input,焦點/時間選擇器會跳掉),
 // 等焦點離開所有欄位後再補畫一次
+// 手機開原生時間/日期選擇器時整個網頁會失焦(activeElement 可能變成 body),
+// 那不算離開欄位,所以用 editingEl 記住最後編輯的欄位,只有網頁仍有焦點時的 focusout 才清掉
 let renderPending = false;
+let editingEl = null;
+function isItinField(el) {
+  return !!(el && /^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName) && el.closest('#days-container'));
+}
 function isEditingItinerary() {
-  const a = document.activeElement;
-  return !!(a && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName) && a.closest('#days-container'));
+  return isItinField(document.activeElement) || !!(editingEl && editingEl.isConnected);
 }
 function renderWhenIdle() {
   if (!isEditingItinerary()) { renderAll(); return; }
   renderPending = true;
 }
+document.addEventListener('focusin', e => { if (isItinField(e.target)) editingEl = e.target; });
 document.addEventListener('focusout', () => {
-  if (!renderPending) return;
+  if (!document.hasFocus()) return;   // 網頁失焦(原生選擇器、切 App),不是離開欄位
   setTimeout(() => {
-    if (renderPending && !isEditingItinerary()) { renderPending = false; renderAll(); }
+    if (!document.hasFocus() || isItinField(document.activeElement)) return;
+    editingEl = null;
+    if (renderPending) { renderPending = false; renderAll(); }
   }, 0);
 });
 
