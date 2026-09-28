@@ -71,17 +71,16 @@ function loadCurrencySettings() {
   onValue(ref(db, `projects/${projectId}/baseCurrency`), snap => {
     baseCurrency = snap.val() || 'JPY';
     updateBudgetBar();
-    if (tripLoaded) renderAll();
+    if (tripLoaded) renderWhenIdle();
   });
   onValue(ref(db, `projects/${projectId}/currencyRates`), snap => {
     currencyRates = snap.val() || {};
     updateBudgetBar();
-    if (tripLoaded) renderAll();
+    if (tripLoaded) renderWhenIdle();
   });
 }
 let tripData    = { title: '', budget: 0, days: {} };
 let map, directionsService;
-let renderers   = {}; // dayId -> DirectionsRenderer[]  (one per spot-pair)
 let allMarkers  = [];
 let activeDay   = null;
 let dragSrc     = null;
@@ -121,9 +120,27 @@ function loadTrip() {
     document.getElementById('trip-title').value = tripData.title || projectMeta?.title || '';
     document.getElementById('budget-total').value = tripData.budget || '';
     tripLoaded = true;
-    renderAll();
+    renderWhenIdle();
   });
 }
+
+// 使用者正在行程欄位輸入時先不重畫(重畫會換掉 input,焦點/時間選擇器會跳掉),
+// 等焦點離開所有欄位後再補畫一次
+let renderPending = false;
+function isEditingItinerary() {
+  const a = document.activeElement;
+  return !!(a && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName) && a.closest('#days-container'));
+}
+function renderWhenIdle() {
+  if (!isEditingItinerary()) { renderAll(); return; }
+  renderPending = true;
+}
+document.addEventListener('focusout', () => {
+  if (!renderPending) return;
+  setTimeout(() => {
+    if (renderPending && !isEditingItinerary()) { renderPending = false; renderAll(); }
+  }, 0);
+});
 
 function save() {
   set(ref(db, `trips/${projectId}`), tripData);
@@ -293,7 +310,8 @@ function renderMapTabs(dayKeys) {
   ct.innerHTML = dayKeys.map((id, i) => {
     const c = DAY_COLORS[i % DAY_COLORS.length];
     const on = visibleDays.has(id);
-    return `<button class="map-tab ${on?'active':''}" title="${on?'點擊隱藏':'點擊顯示'}"
+    const focus = on && id === activeDay;
+    return `<button class="map-tab ${on?'active':''} ${focus?'focus':''}" title="${focus?'聚焦中,再點一下隱藏':on?'點擊聚焦這天':'點擊顯示'}"
       style="${on ? `background:${c};border-color:${c}` : `border-color:${c};color:${c};opacity:.75`}"
       onclick="toggleDayOnMap('${id}')">Day ${i+1}</button>`;
   }).join('');
@@ -308,16 +326,8 @@ function initMapReal() {
     mapTypeControl: false,
     streetViewControl: false,
     fullscreenControl: false,
-    styles: [
-      { elementType:'geometry', stylers:[{color:'#1a1f2e'}] },
-      { featureType:'water', stylers:[{color:'#1e3a5f'}] },
-      { featureType:'road', elementType:'geometry', stylers:[{color:'#2d3448'}] },
-      { featureType:'road', elementType:'labels.text.fill', stylers:[{color:'#8a9bb0'}] },
-      { featureType:'poi', elementType:'labels', stylers:[{visibility:'off'}] },
-      { featureType:'poi.park', elementType:'geometry', stylers:[{color:'#1e2d1e'}] },
-      { featureType:'administrative', elementType:'labels.text.fill', stylers:[{color:'#8a9bb0'}] },
-      { featureType:'transit', stylers:[{visibility:'off'}] },
-    ]
+    // 自訂 styles 會讓底圖圖磚卡住變成一片灰(路線看不出在哪),改用官方深色模式
+    colorScheme: google.maps.ColorScheme?.DARK || 'DARK',
   });
   directionsService = new google.maps.DirectionsService();
 
@@ -435,16 +445,18 @@ function kickMapResize() {
   for (let t = 1500; t <= 45000; t += 3500) setTimeout(nudge, t);
 }
 
-let fallbackLines = [];
 let visibleDays = new Set();
+let segLines = {};        // dayId -> { segIdx: Polyline }
+let drawGen = 0;          // 每次重畫 +1,舊的路線回應直接丟掉
+let lastFitKey = '';      // 顯示內容沒變就不重新縮放,避免編輯時地圖一直跳
+const dirCache = new Map(); // 起訖點 → 路線結果,重畫時不重複呼叫 API
+const skipWarned = new Set();
 
 function clearMap() {
   allMarkers.forEach(m => m.setMap(null));
   allMarkers = [];
-  Object.values(renderers).forEach(arr => arr.forEach(r => r.setMap(null)));
-  renderers = {};
-  fallbackLines.forEach(l => l.setMap(null));
-  fallbackLines = [];
+  Object.values(segLines).forEach(o => Object.values(o).forEach(l => l.setMap(null)));
+  segLines = {};
 }
 
 function haversineKm(a, b) {
@@ -454,7 +466,7 @@ function haversineKm(a, b) {
   return 2 * R * Math.asin(Math.sqrt(s));
 }
 
-// show a day (used by day-card buttons and after edits): ensure visible
+// show a day (used by day-card buttons and after edits): ensure visible + focused
 window.showDayOnMap = showDayOnMap;
 function showDayOnMap(dayId) {
   if (!map || !tripData.days?.[dayId]) return;
@@ -463,14 +475,16 @@ function showDayOnMap(dayId) {
   drawVisibleDays();
 }
 
-// map tab click: toggle a day's route on/off (multiple days can overlay)
+// map tab: 未顯示 → 顯示並聚焦;已顯示但非聚焦 → 聚焦;聚焦中 → 隱藏
 window.toggleDayOnMap = function(dayId) {
-  if (visibleDays.has(dayId)) {
-    visibleDays.delete(dayId);
-    if (activeDay === dayId) activeDay = [...visibleDays].pop() || null;
-  } else {
+  if (!visibleDays.has(dayId)) {
     visibleDays.add(dayId);
     activeDay = dayId;
+  } else if (activeDay !== dayId) {
+    activeDay = dayId;
+  } else {
+    visibleDays.delete(dayId);
+    activeDay = [...visibleDays].pop() || null;
   }
   renderAll._userHidAll = visibleDays.size === 0;
   drawVisibleDays();
@@ -478,97 +492,139 @@ window.toggleDayOnMap = function(dayId) {
 
 function drawVisibleDays() {
   if (!map) return;
+  drawGen++;
   clearMap();
   const ri = document.getElementById('route-info');
   if (ri) ri.style.display = 'none';
 
   const dayKeys = Object.keys(tripData.days || {}).sort();
   [...visibleDays].forEach(d => { if (!tripData.days?.[d]) visibleDays.delete(d); });
+  if (activeDay && !visibleDays.has(activeDay)) activeDay = [...visibleDays].pop() || null;
   renderMapTabs(dayKeys);
 
   const bounds = new google.maps.LatLngBounds();
-  let markerCount = 0;
-  dayKeys.forEach(dayId => {
-    if (visibleDays.has(dayId)) markerCount += drawDay(dayId, bounds);
+  let fitCount = 0, markerCount = 0;
+  // 非聚焦天數先畫(墊底),聚焦天數最後畫(疊在最上面)
+  dayKeys.filter(d => visibleDays.has(d) && d !== activeDay).forEach(d => {
+    const r = drawDay(d, false);
+    markerCount += r.markers;
+    if (!activeDay) r.fitPts.forEach(p => { bounds.extend(p); fitCount++; });
   });
+  if (activeDay) {
+    const r = drawDay(activeDay, true);
+    markerCount += r.markers;
+    r.fitPts.forEach(p => { bounds.extend(p); fitCount++; });
+  }
 
   const navBtn = document.getElementById('map-nav-btn');
   navBtn.style.display = (activeDay && markerCount) ? 'flex' : 'none';
 
-  if (markerCount === 1) {
-    map.setCenter(allMarkers[0].getPosition());
-    map.setZoom(14);
-  } else if (markerCount > 1) {
-    map.fitBounds(bounds, { padding: 60 });
+  const fitKey = activeDay + '|' + [...visibleDays].sort().join(',') + '|' + bounds.toUrlValue();
+  if (fitKey !== lastFitKey && fitCount) {
+    lastFitKey = fitKey;
+    if (fitCount === 1) { map.setCenter(bounds.getCenter()); map.setZoom(14); }
+    else map.fitBounds(bounds, { top: 60, left: 40, right: 40, bottom: 40 });
   }
   if (activeDay) renderRouteInfo(activeDay);
 }
 
-function drawDay(dayId, bounds) {
+function arrowIcons(color) {
+  return [{
+    icon: { path: google.maps.SymbolPath.FORWARD_CLOSED_ARROW, scale: 2.6, fillColor: color, fillOpacity: 1, strokeColor: '#fff', strokeWeight: 1 },
+    offset: '40px', repeat: '110px'
+  }];
+}
+
+// 聚焦天數:每一段不同顏色 + 方向箭頭 + 大標記;其他天數:當日顏色、細線、半透明
+function drawDay(dayId, focused) {
   const day = tripData.days[dayId];
-  if (!day) return 0;
+  const res = { markers: 0, fitPts: [] };
+  if (!day) return res;
   const dayKeys = Object.keys(tripData.days).sort();
   const idx = dayKeys.indexOf(dayId);
-  const color = DAY_COLORS[idx % DAY_COLORS.length];
-  const spots = getSpotsArray(day).filter(s => s.lat && s.lng);
-  if (spots.length === 0) return 0;
+  const dayColor = DAY_COLORS[idx % DAY_COLORS.length];
+  // 編號跟左側清單一致(沒定位的景點不重新編號)
+  const spots = getSpotsArray(day).map((s, i) => ({ ...s, num: i + 1 })).filter(s => s.lat && s.lng);
+  if (spots.length === 0) return res;
 
-  routeStats[dayId] = {};
+  const gen = drawGen;
   const useAvoidTolls = spots.some(s => s.avoidToll);
-  renderers[dayId] = [];
+  routeStats[dayId] = {};
+  segLines[dayId] = {};
+  const byPos = new Map();   // 同一地點(例如出發/回到同一間飯店)合併成「1/5」,避免互相蓋住
 
   spots.forEach((sp, i) => {
-    bounds.extend({ lat: sp.lat, lng: sp.lng });
-    addMarker(sp, i+1, color, SPOT_TYPES[sp.type]?.icon || '📍');
-
-    if (i < spots.length - 1) {
-      const next = spots[i+1];
-      const distKm = haversineKm(sp, next);
-      if (distKm > 300) {
-        showToast(`Day ${idx+1} 第 ${i+1}→${i+2} 段距離異常（${Math.round(distKm)}km），已略過，請檢查景點定位`);
-        return;
-      }
-      const renderer = new google.maps.DirectionsRenderer({
-        suppressMarkers: true,
-        polylineOptions: {
-          strokeColor: color,
-          strokeWeight: 5,
-          strokeOpacity: 0.85,
-          icons: [{ icon: { path: google.maps.SymbolPath.FORWARD_CLOSED_ARROW, scale: 3, fillColor: color, fillOpacity: 1, strokeColor: '#fff', strokeWeight: 1 }, offset: '50%' }]
-        }
-      });
-      renderer.setMap(map);
-      renderers[dayId].push(renderer);
-
-      const segIdx = i;
-      directionsService.route({
-        origin:      { lat: sp.lat,   lng: sp.lng },
-        destination: { lat: next.lat, lng: next.lng },
-        travelMode:  google.maps.TravelMode.DRIVING,
-        avoidTolls:  useAvoidTolls,
-      }, (result, status) => {
-        if (status === 'OK') {
-          renderer.setDirections(result);
-          const leg = result.routes[0]?.legs[0];
-          if (leg) {
-            routeStats[dayId] = routeStats[dayId] || {};
-            routeStats[dayId][segIdx] = {
-              from: sp.name, to: next.name,
-              durText: leg.duration?.text || '', durVal: leg.duration?.value || 0,
-              distText: leg.distance?.text || ''
-            };
-            if (activeDay === dayId) renderRouteInfo(dayId);
-          }
-        } else if (visibleDays.has(dayId)) {
-          fallbackLines.push(new google.maps.Polyline({
-            path: [{ lat: sp.lat, lng: sp.lng }, { lat: next.lat, lng: next.lng }],
-            strokeColor: color, strokeWeight: 4, strokeOpacity: .7, map
-          }));
-        }
-      });
+    const pk = sp.lat.toFixed(5) + ',' + sp.lng.toFixed(5);
+    const prev = byPos.get(pk);
+    if (prev) {
+      prev.nums.push(sp.num);
+      const t = prev.nums.join('/');
+      prev.marker.setLabel({ ...prev.marker.getLabel(), text: t });
+      if (prev.tag) prev.tag.setLabel({ ...prev.tag.getLabel(), text: t + prev.tag.getLabel().text.replace(/^[\d/]+/, '') });
+    } else {
+      byPos.set(pk, { nums: [sp.num], ...addMarker(sp, sp.num, dayColor, SPOT_TYPES[sp.type]?.icon || '📍', focused) });
     }
+    res.markers++;
+    if (i === spots.length - 1) return;
+
+    const next = spots[i + 1];
+    const segColor = focused ? SEGMENT_COLORS[i % SEGMENT_COLORS.length] : dayColor;
+    const stat = { fromNum: sp.num, toNum: next.num, from: sp.name, to: next.name, color: segColor };
+    routeStats[dayId][i] = stat;
+
+    const distKm = haversineKm(sp, next);
+    if (distKm > 300) {   // 跨海/飛機段:不畫,只在面板標示
+      stat.skipped = true;
+      stat.distText = `${Math.round(distKm).toLocaleString()} 公里`;
+      const warnKey = dayId + i;
+      if (focused && !skipWarned.has(warnKey)) {
+        skipWarned.add(warnKey);
+        showToast(`Day ${idx+1} ${sp.num}→${next.num} 距離 ${Math.round(distKm)}km,視為飛機/渡輪段不畫路線`);
+      }
+      return;
+    }
+    res.fitPts.push({ lat: sp.lat, lng: sp.lng }, { lat: next.lat, lng: next.lng });
+
+    const key = `${sp.lat},${sp.lng}>${next.lat},${next.lng}|${useAvoidTolls ? 1 : 0}`;
+    const paint = result => {
+      if (gen !== drawGen) return;           // 已經重畫過,這是舊請求
+      let path, dashed = false;
+      const leg = result?.routes?.[0]?.legs?.[0];
+      if (leg) {
+        path = result.routes[0].overview_path;
+        stat.durText = leg.duration?.text || '';
+        stat.durVal  = leg.duration?.value || 0;
+        stat.distText = leg.distance?.text || '';
+      } else {                                // 查不到路線:虛線直連
+        path = [{ lat: sp.lat, lng: sp.lng }, { lat: next.lat, lng: next.lng }];
+        dashed = true;
+        stat.failed = true;
+      }
+      segLines[dayId][i] = new google.maps.Polyline({
+        path, map,
+        strokeColor: segColor,
+        strokeOpacity: dashed ? 0 : (focused ? 0.95 : 0.4),
+        strokeWeight: focused ? 6 : 3,
+        zIndex: focused ? 20 : 5,
+        icons: dashed
+          ? [{ icon: { path: 'M 0,-1 0,1', strokeOpacity: .9, strokeColor: segColor, scale: 3 }, offset: '0', repeat: '14px' }]
+          : (focused ? arrowIcons(segColor) : [])
+      });
+      if (focused) renderRouteInfo(dayId);
+    };
+
+    if (dirCache.has(key)) { paint(dirCache.get(key)); return; }
+    directionsService.route({
+      origin:      { lat: sp.lat,   lng: sp.lng },
+      destination: { lat: next.lat, lng: next.lng },
+      travelMode:  google.maps.TravelMode.DRIVING,
+      avoidTolls:  useAvoidTolls,
+    }, (result, status) => {
+      if (status === 'OK') { dirCache.set(key, result); paint(result); }
+      else paint(null);
+    });
   });
-  return spots.length;
+  return res;
 }
 
 const SEGMENT_COLORS = ['#ff6b6b','#ffd93d','#6bcb77','#4d96ff','#ff922b','#cc5de8','#20c997','#f06595','#a9e34b','#74c0fc'];
@@ -580,38 +636,76 @@ function renderRouteInfo(dayId) {
   const el = document.getElementById('route-info');
   const stats = routeStats[dayId];
   if (!stats || Object.keys(stats).length === 0) { el.style.display = 'none'; return; }
-  const segs = Object.keys(stats).sort((a,b) => a-b).map(k => stats[k]);
-  const totalMin = Math.round(segs.reduce((s, x) => s + x.durVal, 0) / 60);
+  const segIdxs = Object.keys(stats).map(Number).sort((a, b) => a - b);
+  const totalMin = Math.round(segIdxs.reduce((s, k) => s + (stats[k].durVal || 0), 0) / 60);
   const totalTxt = totalMin >= 60 ? `${Math.floor(totalMin/60)} 小時 ${totalMin%60} 分` : `${totalMin} 分`;
-  el.innerHTML = `<div class="ri-total">🚗 當日總車程約 ${totalTxt}</div>` +
-    segs.map((x, i) => `<div class="ri-seg">${i+1}→${i+2}　${x.durText}（${x.distText}）</div>`).join('');
+  const dayNum = Object.keys(tripData.days).sort().indexOf(dayId) + 1;
+  el.innerHTML = `<div class="ri-total">Day ${dayNum}｜🚗 總車程約 ${totalTxt}</div>` +
+    segIdxs.map(k => {
+      const x = stats[k];
+      const info = x.skipped ? `✈️ 不畫路線(${x.distText})`
+        : x.failed ? '⚠️ 查不到路線(虛線)'
+        : x.durText ? `${x.durText}・${x.distText}` : '計算中…';
+      return `<div class="ri-seg" onclick="focusSegment('${dayId}',${k})" title="點一下放大這段">
+        <span class="ri-sw" style="background:${x.color}"></span>
+        <span class="ri-names"><b>${x.fromNum}</b> ${esc(x.from||'')} → <b>${x.toNum}</b> ${esc(x.to||'')}</span>
+        <span class="ri-dur">${info}</span>
+      </div>`;
+    }).join('');
   el.style.display = 'block';
 }
 
-function addMarker(sp, num, color, icon) {
+// 點面板上的某一段:放大到那段並加粗閃一下
+window.focusSegment = function(dayId, segIdx) {
+  const line = segLines[dayId]?.[segIdx];
+  if (!line) return;
+  const b = new google.maps.LatLngBounds();
+  line.getPath().forEach(p => b.extend(p));
+  map.fitBounds(b, { top: 80, left: 40, right: 40, bottom: 40 });
+  const w = line.get('strokeWeight');
+  line.setOptions({ strokeWeight: w + 5, zIndex: 30 });
+  setTimeout(() => line.setOptions({ strokeWeight: w, zIndex: 20 }), 1500);
+};
+
+function addMarker(sp, num, color, icon, focused = true) {
   const infoContent = `
     <div style="font-family:'Noto Sans TC',sans-serif;padding:6px 8px;min-width:140px;background:#1e2235;color:#e6edf3;border-radius:8px">
-      <div style="font-size:13px;font-weight:700;margin-bottom:4px">${icon} ${sp.name}</div>
+      <div style="font-size:13px;font-weight:700;margin-bottom:4px">${num}. ${icon} ${esc(sp.name||'')}</div>
       ${sp.time ? `<div style="font-size:11px;color:#8b949e">⏰ ${sp.time}</div>` : ''}
-      ${sp.note ? `<div style="font-size:11px;color:#8b949e">📝 ${sp.note}</div>` : ''}
-      ${sp.cost ? `<div style="font-size:11px;color:#d4a843">💴 ¥${Number(sp.cost).toLocaleString()}</div>` : ''}
+      ${sp.note ? `<div style="font-size:11px;color:#8b949e">📝 ${esc(sp.note)}</div>` : ''}
+      ${sp.cost ? `<div style="font-size:11px;color:#d4a843">💴 ${Number(sp.cost).toLocaleString()} ${sp.costCurrency||''}</div>` : ''}
     </div>`;
   const iw = new google.maps.InfoWindow({ content: infoContent });
 
   const marker = new google.maps.Marker({
     position: { lat: sp.lat, lng: sp.lng },
     map,
-    title: sp.name,
-    label: { text: String(num), color:'#fff', fontWeight:'bold', fontSize:'11px' },
+    title: `${num}. ${sp.name}`,
+    label: { text: String(num), color:'#fff', fontWeight:'bold', fontSize: focused ? '12px' : '9px' },
     icon: {
       path: google.maps.SymbolPath.CIRCLE,
-      fillColor: color, fillOpacity: 1,
-      strokeColor: '#fff', strokeWeight: 2.5, scale: 16
+      fillColor: color, fillOpacity: focused ? 1 : 0.55,
+      strokeColor: '#fff', strokeWeight: focused ? 2.5 : 1.5, scale: focused ? 15 : 10
     },
-    zIndex: 100
+    zIndex: focused ? 200 + num : 50
   });
   marker.addListener('click', () => iw.open(map, marker));
   allMarkers.push(marker);
+
+  // 聚焦天數:標記上方加「編號 名稱」小標籤,一眼看出第幾站是哪裡
+  let tag = null;
+  if (focused && sp.name) {
+    tag = new google.maps.Marker({
+      position: { lat: sp.lat, lng: sp.lng },
+      map,
+      clickable: false,
+      icon: { path: 'M 0,0', scale: 0 },
+      label: { text: `${num}. ${sp.name.length > 12 ? sp.name.slice(0, 12) + '…' : sp.name}`, className: 'mk-name', color: '#fff', fontSize: '11px', fontWeight: '600' },
+      zIndex: 300 + num
+    });
+    allMarkers.push(tag);
+  }
+  return { marker, tag };
 }
 
 window.openNavigation = function() {
@@ -958,7 +1052,7 @@ function loadPhotos() {
   });
   onValue(ref(db, 'pois'), snap => {
     poisCache = snap.val() || {};
-    if (tripLoaded) renderAll();
+    if (tripLoaded) renderWhenIdle();
   });
 }
 
@@ -1438,9 +1532,16 @@ body.no-select { user-select:none; -webkit-user-select:none; }
 .day-card.collapsed .spots-list, .day-card.collapsed .add-spot-row { display:none; }
 
 /* ── ROUTE INFO ── */
-#route-info { position:absolute; bottom:16px; left:12px; z-index:10; background:rgba(13,17,23,.88); border:1px solid var(--border); border-radius:10px; padding:8px 12px; font-size:.68rem; color:var(--text); max-width:260px; max-height:180px; overflow-y:auto; display:none; }
-#route-info .ri-total { font-weight:700; color:var(--gold); margin-bottom:4px; }
-#route-info .ri-seg { color:var(--muted); line-height:1.6; }
+#route-info { position:absolute; bottom:16px; left:12px; z-index:10; background:rgba(13,17,23,.92); border:1px solid var(--border); border-radius:10px; padding:8px 10px; font-size:.72rem; color:var(--text); width:340px; max-width:calc(100% - 24px); max-height:40%; overflow-y:auto; display:none; }
+#route-info .ri-total { font-weight:700; color:var(--gold); margin-bottom:6px; }
+#route-info .ri-seg { display:grid; grid-template-columns:14px 1fr; gap:0 8px; align-items:center; padding:5px 4px; border-radius:6px; cursor:pointer; }
+#route-info .ri-seg:hover { background:rgba(255,255,255,.06); }
+#route-info .ri-sw { width:14px; height:5px; border-radius:3px; grid-row:span 2; }
+#route-info .ri-names { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+#route-info .ri-names b { color:var(--gold); }
+#route-info .ri-dur { color:var(--muted); font-size:.66rem; }
+.map-tab.focus { box-shadow:0 0 0 2px #fff, 0 2px 8px rgba(0,0,0,.4); }
+.mk-name { background:rgba(13,17,23,.85); border:1px solid rgba(255,255,255,.25); border-radius:10px; padding:2px 8px; white-space:nowrap; transform:translateY(-30px); pointer-events:none; }
 
 /* ── POI CARD (map click) ── */
 #poi-card { position:absolute; bottom:16px; left:50%; transform:translateX(-50%); z-index:20; background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:14px; width:300px; max-width:calc(100% - 24px); box-shadow:0 12px 40px rgba(0,0,0,.55); display:none; }
@@ -1516,19 +1617,74 @@ body.no-select { user-select:none; -webkit-user-select:none; }
     transform: translateX(0);
   }
 
-  .nav-title-input { font-size:.82rem; }
+  /* dvh: 扣掉手機網址列,避免底部被切 */
+  body { height: 100dvh; }
 
-  /* larger text & touch targets on mobile */
-  .spot-name-inp { font-size:.95rem; }
-  .spot-note, .spot-time, .spot-cost { font-size:.78rem; }
+  /* iOS 輸入框 <16px 會自動放大畫面 → 一律 16px */
+  input, select, textarea { font-size: 16px !important; }
+
+  /* NAV:logo 與分享鈕讓位給行程名稱(工具列已有分享) */
+  nav { padding: 0 10px; gap: 8px; height: 50px; }
+  .nav-logo { display: none; }
+  .nav-back { font-size: 1.2rem; padding: 6px 4px; }
+  .nav-actions .btn-nav:not(.map-btn) { display: none; }
+  .btn-nav { padding: 8px 12px; font-size: .82rem; }
+
+  /* 預算列:壓成一行,「預算」數字與輸入框重複故隱藏 */
+  .budget-strip { padding: 6px 12px; gap: 4px 12px; }
+  .budget-field input { width: 80px; }
+  .budget-nums { gap: 12px; }
+  .budget-num:nth-child(2) { display: none; }
+  .budget-num .val { font-size: .82rem; }
+  .bar-wrap { flex-basis: 100%; }
+
+  /* 工具列:單行橫向捲動 */
+  #itinerary-panel { padding: 10px; gap: 10px; }
+  .toolbar { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin: 0 -10px; padding: 0 10px; }
+  .toolbar::-webkit-scrollbar { display: none; }
+  .btn-add-day, .btn-share { padding: 10px 14px; font-size: .85rem; white-space: nowrap; flex-shrink: 0; }
+
+  /* DAY 標頭 */
   .day-pill { font-size:.72rem; }
   .day-date, .day-cost { font-size:.85rem; }
-  .day-summary { font-size:.8rem; padding:10px 14px; }
-  .btn-ic, .btn-map-day { padding:7px 11px; font-size:.78rem; }
-  .btn-spot-del, .btn-spot-detail { font-size:1rem; padding:6px; }
-  .spot-move-sel { width:34px; font-size:.7rem; }
-  .add-spot-inp { font-size:.9rem; }
-  .btn-add-spot { padding:8px 14px; font-size:.82rem; }
+  .day-hd-right { width: 100%; }
+  .day-cost { margin-right: auto; }
+  .day-summary { font-size:.85rem; padding:12px 14px; }
+  .btn-ic, .btn-map-day { min-width: 40px; min-height: 36px; padding:7px 11px; font-size:.82rem; }
+
+  /* 景點卡:類型圖示與下拉重複 → 隱藏圖示;名稱獨佔一行;備註換到第三行 */
+  .spot-item { padding: 10px 8px 10px 10px; gap: 8px; }
+  .spot-type-icon { display: none; }
+  .spot-row1 { flex-wrap: wrap; margin-bottom: 6px; }
+  .spot-name-inp { min-width: 0; flex: 1 1 100%; font-weight: 600; }
+  .spot-type-sel { padding: 4px 6px; }
+  .spot-row2 { gap: 6px 8px; }
+  .spot-time { width: 110px; color: var(--text); }
+  .spot-cost { width: 80px; }
+  .spot-cur-sel { padding: 3px 2px; }
+  .spot-note { order: 3; flex: 1 1 100%; padding: 6px 8px; }
+  .spot-warn { font-size: .78rem; }
+  .spot-side { gap: 6px; }
+  .btn-spot-del, .btn-spot-detail { font-size: 1.05rem; width: 38px; height: 38px; padding: 0; }
+  .spot-move-sel { width: 38px; height: 34px; }
+
+  /* 新增列 */
+  .add-spot-row { padding: 10px; flex-wrap: wrap; }
+  .add-spot-inp { flex: 1 1 100%; padding: 8px 2px; border-bottom: 1px dashed rgba(255,255,255,.15); color: var(--text); }
+  .add-type-sel { flex: 1; padding: 6px; }
+  .btn-add-spot { padding: 10px 18px; font-size: .88rem; }
+
+  /* 地圖:手機的景點詳情是整頁跳轉,切換籤用不到 */
+  .panel-switch { display: none; }
+  .map-day-tabs { max-width: calc(100% - 24px); }
+  .map-tab { padding: 7px 14px; font-size: .8rem; }
+  #route-info { bottom: 76px; max-width: calc(100% - 24px); }
+  #map-nav-btn { left: 12px; right: 12px; justify-content: center; padding: 12px; }
+
+  /* 彈窗 */
+  .pm-close { padding: 8px 10px; font-size: 1.2rem; }
+  .pm-cell .pm-del { width: 28px; height: 28px; }
+  .toast { white-space: normal; max-width: calc(100% - 32px); text-align: center; }
 }
 
 @media (min-width: 769px) {
