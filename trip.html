@@ -90,6 +90,8 @@ let mapVisible  = false;
 onAuthStateChanged(auth, async user => {
   if (!user) { location.href = 'index.html'; return; }
   currentUser = user;
+  // 連不上網路時,5 秒內沒拿到資料就先顯示這台裝置上次存的行程
+  setTimeout(showCachedTrip, navigator.onLine ? 5000 : 0);
   const snap = await get(ref(db, `users/${user.uid}`));
   const ud = snap.val();
   if (!ud || (ud.status !== 'approved' && !ud.isAdmin)) { location.href = 'index.html'; return; }
@@ -109,6 +111,7 @@ onAuthStateChanged(auth, async user => {
   loadCurrencySettings();
   loadTrip();
   loadPhotos();
+  loadExpenses();
 });
 
 // ── LOAD TRIP ─────────────────────────────────
@@ -120,6 +123,12 @@ function loadTrip() {
     document.getElementById('trip-title').value = tripData.title || projectMeta?.title || '';
     document.getElementById('budget-total').value = tripData.budget || '';
     tripLoaded = true;
+    if (offlineMode) {
+      offlineMode = false;
+      document.body.classList.remove('readonly');
+      document.getElementById('offline-bar').style.display = 'none';
+    }
+    cacheTrip();
     renderWhenIdle();
   });
 }
@@ -131,7 +140,7 @@ function loadTrip() {
 let renderPending = false;
 let editingEl = null;
 function isItinField(el) {
-  return !!(el && /^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName) && el.closest('#days-container'));
+  return !!(el && /^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName) && el.closest('#days-container, #pool-container'));
 }
 function isEditingItinerary() {
   return isItinField(document.activeElement) || !!(editingEl && editingEl.isConnected);
@@ -151,6 +160,7 @@ document.addEventListener('focusout', () => {
 });
 
 function save() {
+  if (offlineMode) { showToast('📴 離線模式無法修改'); return; }
   set(ref(db, `trips/${projectId}`), tripData);
 }
 
@@ -167,6 +177,10 @@ window.saveMeta = saveMeta;
 function renderAll() {
   const dayKeys = Object.keys(tripData.days || {}).sort();
   const container = document.getElementById('days-container');
+  renderPool();
+  updateChecklistBadge();
+  if (isModalOpen('info-modal-mask')) renderInfo();
+  if (isModalOpen('check-modal-mask')) renderChecklist();
 
   if (dayKeys.length === 0) {
     container.innerHTML = `<div class="empty-state"><div class="ei">✈️</div><p>點擊「新增天數」開始規劃行程</p></div>`;
@@ -176,35 +190,53 @@ function renderAll() {
   }
 
   loadCollapseState(dayKeys);
+  const today = todayStr();
+  const todayDay = dayKeys.find(k => tripData.days[k].date === today) || null;
+  document.getElementById('btn-today').style.display = todayDay ? '' : 'none';
+  // 旅程期間第一次打開:只展開今天、地圖聚焦今天(不寫進收合偏好)
+  let scrollToday = false;
+  if (todayDay && !todayApplied) {
+    todayApplied = true;
+    dayKeys.forEach(k => { collapsedDays[k] = k !== todayDay; });
+    visibleDays.clear(); visibleDays.add(todayDay); activeDay = todayDay;
+    scrollToday = true;
+  }
 
+  let nextInfo = null;
   container.innerHTML = dayKeys.map((dayId, idx) => {
     const day   = tripData.days[dayId];
     const spots = getSpotsArray(day);
     const color = DAY_COLORS[idx % DAY_COLORS.length];
     const totalCost = spots.reduce((s, sp) => s + toBase(parseFloat(sp.cost)||0, sp.costCurrency||baseCurrency), 0);
     const collapsed = !!collapsedDays[dayId];
+    const isToday = dayId === todayDay;
+    const sched = computeSchedule(day);
+    const nextId = isToday ? findNextSpot(spots, sched) : null;
+    if (nextId) nextInfo = { dayId, sp: spots.find(s => s.id === nextId), arrive: sched[nextId]?.arrive };
+    if (!collapsed) requestLegs(dayId);
     const summary = spots.length
       ? `${spots.length} 個景點${spots[0]?.name ? '｜' + esc(spots[0].name) + (spots.length > 1 ? ' → ' + esc(spots[spots.length-1].name) : '') : ''}`
       : '尚無景點';
     return `
-    <div class="day-card ${collapsed ? 'collapsed' : ''}" data-day="${dayId}">
+    <div class="day-card ${collapsed ? 'collapsed' : ''} ${isToday ? 'today' : ''}" data-day="${dayId}">
       <div class="day-hd" style="border-left:4px solid ${color}" onclick="toggleDayCollapse('${dayId}', event)">
         <div class="day-hd-left">
           <span class="day-chevron">${collapsed ? '▸' : '▾'}</span>
           <span class="day-pill" style="background:${color}22;color:${color}">Day ${idx+1}</span>
+          ${isToday ? '<span class="today-pill">今天</span>' : ''}
           <input class="day-date" type="date" value="${day.date||''}" onchange="updateDayDate('${dayId}',this.value)">
+          <span class="day-wx" id="wx-${dayId}">${wxHtml(dayId)}</span>
         </div>
         <div class="day-hd-right">
-          <span class="day-cost" style="color:${color}">${symbolFor(baseCurrency)}${Math.round(totalCost).toLocaleString()}</span>
+          <span class="day-cost" style="color:${color}" title="預估">${symbolFor(baseCurrency)}${Math.round(totalCost).toLocaleString()}</span>
           <button class="btn-ic" title="照片" onclick="openPhotos('${dayId}')">📸</button>
           <button class="btn-map-day" style="background:${color}" onclick="showDayOnMap('${dayId}')">🗺 地圖</button>
-          <button class="btn-ic" onclick="focusAdd('${dayId}')">＋</button>
-          <button class="btn-ic danger" onclick="deleteDay('${dayId}')">🗑</button>
+          <button class="btn-ic danger" title="刪除這天" onclick="deleteDay('${dayId}')">🗑</button>
         </div>
       </div>
       ${collapsed ? `<div class="day-summary" onclick="toggleDayCollapse('${dayId}')">${summary}</div>` : ''}
       <ul class="spots-list" id="spots-${dayId}">
-        ${spots.map((sp, i) => renderSpot(dayId, sp, i, color, spots.length)).join('')}
+        ${spots.map((sp, i) => renderSpot(dayId, sp, i, color, spots.length, sched[sp.id], sp.id === nextId)).join('')}
       </ul>
       <div class="add-spot-row">
         <input class="add-spot-inp" id="new-${dayId}" placeholder="輸入景點名稱後 Enter…" onkeydown="if(event.key==='Enter')quickAdd('${dayId}')">
@@ -216,8 +248,10 @@ function renderAll() {
     </div>`;
   }).join('');
 
+  renderNextBar(nextInfo);
   renderMapTabs(dayKeys);
   updateBudgetBar();
+  loadWeather(dayKeys);
 
   if (visibleDays.size === 0 && dayKeys.length && !renderAll._userHidAll) {
     visibleDays.add(dayKeys[0]);
@@ -225,6 +259,7 @@ function renderAll() {
   }
   if (activeDay && !tripData.days[activeDay]) activeDay = [...visibleDays][0] || null;
   if (map) drawVisibleDays();
+  if (scrollToday) setTimeout(() => jumpToToday(), 50);
 }
 
 // ── SPOT RENDER ───────────────────────────────
@@ -245,33 +280,63 @@ const SPOT_TYPES = {
 
 const DAY_COLORS = ['#4a7c59','#c4783a','#2e6da4','#8e44ad','#c0392b','#16a085','#d4a843','#1a6b8a'];
 
-function renderSpot(dayId, sp, i, dayColor, total) {
+function renderSpot(dayId, sp, i, dayColor, total, sch = {}, isNext = false) {
   const t = SPOT_TYPES[sp.type] || SPOT_TYPES.attraction;
   const isLast = i === total - 1;
+  const open = openSpot === dayId + '/' + sp.id;
   const dayKeys = Object.keys(tripData.days || {}).sort();
   const moveOptions = dayKeys.filter(k => k !== dayId)
     .map(k => `<option value="${k}">移至 Day ${dayKeys.indexOf(k)+1}</option>`).join('');
 
   let warnHtml = '';
   const dayDate = tripData.days[dayId]?.date;
-  if (sp.poiId && dayDate && sp.time) {
-    const closed = isSpotClosed(sp.poiId, dayDate, sp.time);
+  const checkTime = sp.time || (sch.eta != null ? minToHm(sch.eta) : '');
+  if (sp.poiId && dayDate && checkTime) {
+    const closed = isSpotClosed(sp.poiId, dayDate, checkTime);
     if (closed === true) {
       const dow = new Date(dayDate + 'T00:00:00').getDay();
       const hoursTxt = hoursTextForDow(sp.poiId, dow);
-      warnHtml = `<span class="spot-warn" title="當日營業時間：${esc(hoursTxt)}">⚠️ 該時段可能未營業</span>`;
+      warnHtml = `<span class="spot-warn" title="當日營業時間：${esc(hoursTxt)}">⚠️ 可能未營業</span>`;
     }
   }
+  if (sch.late != null) warnHtml += `<span class="spot-warn" title="依前一站時間+停留+車程推算">⚠️ 預計 ${minToHm(sch.late)} 才到</span>`;
+
+  const timeHtml = sp.time
+    ? `<span class="sc-time">${sp.time}</span>`
+    : sch.eta != null ? `<span class="sc-time eta" title="依前一站時間+停留+車程推算">約 ${minToHm(sch.eta)}</span>` : '';
+  const stay = parseInt(sp.stay) || 0;
+  const cost = parseFloat(sp.cost) || 0;
+  const booked = sp.expenseId && expensesCache[sp.expenseId];
 
   return `
-  <li class="spot-item" data-spot="${sp.id}" data-day="${dayId}">
+  <li class="spot-item ${open ? 'open' : ''} ${isNext ? 'is-next' : ''}" data-spot="${sp.id}" data-day="${dayId}">
     <div class="spot-left">
       <div class="spot-num" style="background:${dayColor}">${i+1}</div>
       ${!isLast ? `<div class="spot-line" style="background:${dayColor}"></div>` : ''}
     </div>
     <div class="spot-type-icon" style="background:${t.color}22;color:${t.color}" title="${t.label}">${t.icon}</div>
-    <div class="spot-body">
-      <div class="spot-row1">
+    <div class="spot-body" onclick="toggleSpot('${dayId}','${sp.id}')">
+      <div class="sc-row1">
+        <span class="sc-name">${esc(sp.name || '(未命名)')}</span>
+        ${isNext ? '<span class="next-pill">下一站</span>' : ''}
+      </div>
+      <div class="sc-row2">
+        ${timeHtml}
+        ${stay ? `<span class="sc-stay">停 ${fmtStay(stay)}</span>` : ''}
+        ${cost ? `<span class="sc-cost">${symbolFor(sp.costCurrency||baseCurrency)}${cost.toLocaleString()}</span>` : ''}
+        ${booked ? '<span class="sc-booked" title="已記入費用頁">✓ 已記帳</span>' : ''}
+        ${!sp.lat ? '<span class="sc-nogeo" title="沒有定位,地圖與車程不會計算">📍 未定位</span>' : ''}
+        ${sp.note ? `<span class="sc-note">${esc(sp.note)}</span>` : ''}
+      </div>
+      ${warnHtml ? `<div class="sc-row2">${warnHtml}</div>` : ''}
+    </div>
+    <div class="spot-side">
+      ${sp.lat ? `<button class="btn-spot-nav" title="從目前位置導航到這裡" onclick="navigateTo('${dayId}','${sp.id}')">🧭</button>` : ''}
+      <button class="btn-spot-toggle" title="${open ? '收合' : '編輯'}" onclick="toggleSpot('${dayId}','${sp.id}')">${open ? '▴' : '✎'}</button>
+    </div>
+    ${open ? `
+    <div class="spot-edit">
+      <div class="se-row">
         <input class="spot-name-inp" value="${esc(sp.name||'')}" placeholder="景點名稱"
           onchange="updateSpot('${dayId}','${sp.id}','name',this.value)"
           onblur="geocodeSpot('${dayId}','${sp.id}',this.value)">
@@ -279,36 +344,524 @@ function renderSpot(dayId, sp, i, dayColor, total) {
           ${Object.entries(SPOT_TYPES).map(([k,v])=>`<option value="${k}" ${sp.type===k?'selected':''}>${v.icon} ${v.label}</option>`).join('')}
         </select>
       </div>
-      <div class="spot-row2">
-        <input class="spot-time" type="time" value="${sp.time||''}" title="到達時間"
-          onchange="updateSpot('${dayId}','${sp.id}','time',this.value)">
-        <input class="spot-note" value="${esc(sp.note||'')}" placeholder="備註…"
-          onchange="updateSpot('${dayId}','${sp.id}','note',this.value)">
-        <span class="spot-cost-wrap">
-          <input class="spot-cost" type="number" value="${sp.cost||''}" placeholder="費用"
-            onchange="updateSpot('${dayId}','${sp.id}','cost',this.value)">
-          <select class="spot-cur-sel" onchange="updateSpot('${dayId}','${sp.id}','costCurrency',this.value)">
-            ${Object.keys(CURRENCY_SYMBOLS).map(c => `<option value="${c}" ${(sp.costCurrency||baseCurrency)===c?'selected':''}>${c}</option>`).join('')}
-          </select>
-        </span>
+      <div class="se-row">
+        <label class="se-field">到達
+          <input class="spot-time" type="time" value="${sp.time||''}"
+            onchange="updateSpot('${dayId}','${sp.id}','time',this.value)"></label>
+        <label class="se-field">停留(分)
+          <input class="spot-stay" type="number" min="0" step="15" inputmode="numeric" value="${stay || ''}" placeholder="0"
+            onchange="updateSpot('${dayId}','${sp.id}','stay',this.value)"></label>
+        <label class="se-field">費用
+          <span class="spot-cost-wrap">
+            <input class="spot-cost" type="number" inputmode="decimal" value="${sp.cost||''}" placeholder="0"
+              onchange="updateSpot('${dayId}','${sp.id}','cost',this.value)">
+            <select class="spot-cur-sel" onchange="updateSpot('${dayId}','${sp.id}','costCurrency',this.value)">
+              ${Object.keys(CURRENCY_SYMBOLS).map(c => `<option value="${c}" ${(sp.costCurrency||baseCurrency)===c?'selected':''}>${c}</option>`).join('')}
+            </select>
+          </span></label>
       </div>
+      <input class="spot-note" value="${esc(sp.note||'')}" placeholder="備註…"
+        onchange="updateSpot('${dayId}','${sp.id}','note',this.value)">
       ${sp.type === 'toll' ? `
-      <div class="spot-row2">
-        <label class="toggle-label">
-          <input type="checkbox" ${sp.avoidToll?'checked':''} onchange="updateSpot('${dayId}','${sp.id}','avoidToll',this.checked)">
-          避開付費路段
-        </label>
-      </div>` : ''}
-      ${warnHtml ? `<div class="spot-row2">${warnHtml}</div>` : ''}
-    </div>
-    <div class="spot-side">
-      <button class="btn-spot-del" onclick="deleteSpot('${dayId}','${sp.id}')">✕</button>
-      <button class="btn-spot-detail" title="景點詳情" onclick="openPoiDetail('${dayId}','${sp.id}')">📖</button>
-      ${moveOptions ? `<select class="spot-move-sel" onchange="moveSpotToDay('${dayId}','${sp.id}',this.value)">
-        <option value="">⇄</option>${moveOptions}
-      </select>` : ''}
-    </div>
+      <label class="toggle-label">
+        <input type="checkbox" ${sp.avoidToll?'checked':''} onchange="updateSpot('${dayId}','${sp.id}','avoidToll',this.checked)">
+        避開付費路段
+      </label>` : ''}
+      <div class="se-actions">
+        <button class="btn-ic" onclick="openPoiDetail('${dayId}','${sp.id}')">📖 詳情</button>
+        <button class="btn-ic" onclick="openExpenseModal('${dayId}','${sp.id}')">💳 ${booked ? '再記一筆' : '記帳'}</button>
+        ${moveOptions ? `<select class="spot-move-sel" onchange="moveSpotToDay('${dayId}','${sp.id}',this.value)">
+          <option value="">⇄ 移到…</option>${moveOptions}
+        </select>` : ''}
+        <button class="btn-ic danger" onclick="deleteSpot('${dayId}','${sp.id}')">🗑 刪除</button>
+      </div>
+    </div>` : ''}
   </li>`;
+}
+
+// ── SHARED STATE / UTILS ──────────────────────
+let offlineMode   = false;
+let expensesCache = {};     // expenses/{pid}:費用頁的實際記帳
+let openSpot      = null;   // 'dayId/spotId':目前展開編輯的景點卡
+let todayApplied  = false;
+
+function todayStr() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+function hmToMin(t) {
+  if (!t) return null;
+  const [h, m] = t.split(':').map(Number);
+  return isNaN(h) ? null : h * 60 + (m || 0);
+}
+function minToHm(m) {
+  m = ((Math.round(m) % 1440) + 1440) % 1440;
+  return String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
+}
+function fmtStay(m) {
+  if (m < 60) return `${m} 分`;
+  return m % 60 ? `${Math.floor(m / 60)} 小時 ${m % 60} 分` : `${m / 60} 小時`;
+}
+function isModalOpen(id) { return document.getElementById(id)?.classList.contains('open'); }
+
+// ── SCHEDULE:到達時間 + 停留 + 車程 → 推算下一站 ──
+const legPending = new Set(), legFailed = new Set();
+function legKey(a, b, avoid) { return `${a.lat},${a.lng}>${b.lat},${b.lng}|${avoid ? 1 : 0}`; }
+function legSeconds(a, b, avoid) {
+  return dirCache.get(legKey(a, b, avoid))?.routes?.[0]?.legs?.[0]?.duration?.value ?? null;
+}
+// 背景查各段車程(與地圖共用 dirCache),查到後重畫一次讓預估時間出現
+let legRerenderTimer = null;
+function requestLegs(dayId) {
+  if (!directionsService || !tripData.days?.[dayId]) return;
+  const spots = getSpotsArray(tripData.days[dayId]).filter(s => s.lat && s.lng);
+  const avoid = spots.some(s => s.avoidToll);
+  for (let i = 0; i < spots.length - 1; i++) {
+    const a = spots[i], b = spots[i + 1], k = legKey(a, b, avoid);
+    if (dirCache.has(k) || legPending.has(k) || legFailed.has(k) || haversineKm(a, b) > 300) continue;
+    legPending.add(k);
+    directionsService.route({
+      origin: { lat: a.lat, lng: a.lng }, destination: { lat: b.lat, lng: b.lng },
+      travelMode: google.maps.TravelMode.DRIVING, avoidTolls: avoid,
+    }, (res, status) => {
+      legPending.delete(k);
+      if (status !== 'OK') { legFailed.add(k); return; }
+      dirCache.set(k, res);
+      clearTimeout(legRerenderTimer);
+      legRerenderTimer = setTimeout(renderWhenIdle, 400);
+    });
+  }
+}
+function computeSchedule(day) {
+  const spots = getSpotsArray(day);
+  const avoid = spots.filter(s => s.lat && s.lng).some(s => s.avoidToll);
+  const out = {};
+  let depart = null, prev = null;
+  spots.forEach(sp => {
+    let cursor = null;
+    if (prev && depart != null && sp.lat && sp.lng && prev.lat && prev.lng) {
+      const sec = legSeconds(prev, sp, avoid);
+      if (sec != null) cursor = depart + sec / 60;
+    }
+    const r = {};
+    const t = hmToMin(sp.time);
+    if (t != null) {
+      r.arrive = t;
+      if (cursor != null && cursor > t + 5) r.late = cursor;
+    } else if (cursor != null) {
+      r.arrive = r.eta = cursor;
+    }
+    out[sp.id] = r;
+    depart = r.arrive != null ? r.arrive + (parseInt(sp.stay) || 0) : null;
+    prev = sp;
+  });
+  return out;
+}
+function findNextSpot(spots, sched) {
+  const now = new Date().getHours() * 60 + new Date().getMinutes();
+  return spots.find(s => sched[s.id]?.arrive != null && sched[s.id].arrive >= now)?.id || null;
+}
+
+// ── SPOT CARD / NAV / TODAY ───────────────────
+window.toggleSpot = function(dayId, spotId) {
+  if (window.__justDragged) { window.__justDragged = false; return; }
+  const key = dayId + '/' + spotId;
+  openSpot = openSpot === key ? null : key;
+  renderAll();
+};
+window.navigateTo = function(dayId, spotId) {
+  const sp = tripData.days[dayId]?.spots?.[spotId];
+  if (!sp?.lat) return;
+  let url = `https://www.google.com/maps/dir/?api=1&destination=${sp.lat},${sp.lng}&travelmode=driving`;
+  if (sp.placeId) url += `&destination_place_id=${encodeURIComponent(sp.placeId)}`;
+  window.open(url, '_blank');
+};
+window.jumpToToday = function() {
+  const dayKeys = Object.keys(tripData.days || {}).sort();
+  const d = dayKeys.find(k => tripData.days[k].date === todayStr());
+  if (!d) return;
+  if (collapsedDays[d]) { collapsedDays[d] = false; renderAll(); }
+  document.querySelector(`.day-card[data-day="${d}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  showDayOnMap(d);
+};
+function renderNextBar(info) {
+  const el = document.getElementById('next-bar');
+  if (!info?.sp) { el.style.display = 'none'; return; }
+  el.innerHTML = `<span>🧭 下一站</span><b class="nb-name">${esc(info.sp.name || '')}</b>
+    ${info.arrive != null ? `<span class="nb-time">${info.sp.time ? '' : '約 '}${minToHm(info.arrive)}</span>` : ''}
+    ${info.sp.lat ? `<button class="nb-go" onclick="navigateTo('${info.dayId}','${info.sp.id}')">導航</button>` : ''}`;
+  el.style.display = 'flex';
+}
+// 旅程中每 5 分鐘更新「下一站」
+setInterval(() => {
+  if (tripLoaded && document.getElementById('btn-today')?.style.display !== 'none') renderWhenIdle();
+}, 5 * 60 * 1000);
+
+// ── UNDO ──────────────────────────────────────
+let undoFn = null, undoTimer = null;
+function showUndo(text, fn) {
+  undoFn = fn;
+  document.getElementById('undo-text').textContent = text;
+  const bar = document.getElementById('undo-bar');
+  bar.classList.add('show');
+  clearTimeout(undoTimer);
+  undoTimer = setTimeout(() => { bar.classList.remove('show'); undoFn = null; }, 6000);
+}
+window.doUndo = function() {
+  const fn = undoFn;
+  undoFn = null;
+  document.getElementById('undo-bar').classList.remove('show');
+  if (!fn) return;
+  fn();
+  save();
+  showToast('已復原 ✓');
+};
+
+// ── WEATHER(Open-Meteo,免 key,只抓 16 天內)──
+const wxCache = {};
+function wxKey(dayId) {
+  const day = tripData.days?.[dayId];
+  if (!day?.date) return null;
+  // 用當天最後一個有定位的景點(通常是住宿/目的地),避免抓到出發地機場
+  const sp = [...getSpotsArray(day)].reverse().find(s => s.lat && s.lng);
+  return sp ? `${sp.lat.toFixed(2)},${sp.lng.toFixed(2)},${day.date}` : null;
+}
+function wxIcon(c) {
+  return c === 0 ? '☀️' : c <= 2 ? '🌤️' : c === 3 ? '☁️' : c <= 48 ? '🌫️' : c <= 57 ? '🌦️'
+    : c <= 67 ? '🌧️' : c <= 77 ? '🌨️' : c <= 82 ? '🌧️' : '⛈️';
+}
+function wxHtml(dayId) {
+  const v = wxCache[wxKey(dayId)];
+  return v && v !== 'loading' ? v : '';
+}
+function loadWeather(dayKeys) {
+  const t0 = new Date(todayStr() + 'T00:00:00');
+  dayKeys.forEach(dayId => {
+    const k = wxKey(dayId);
+    if (!k || k in wxCache) return;
+    const [lat, lng, date] = k.split(',');
+    const diff = (new Date(date + 'T00:00:00') - t0) / 864e5;
+    if (diff < 0 || diff > 15) return;
+    wxCache[k] = 'loading';
+    fetch(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=auto&start_date=${date}&end_date=${date}`)
+      .then(r => r.json())
+      .then(j => {
+        const d = j.daily;
+        if (!d?.time?.length) { wxCache[k] = ''; return; }
+        const rain = d.precipitation_probability_max?.[0];
+        wxCache[k] = `<span title="天氣預報(Open-Meteo)">${wxIcon(d.weather_code[0])} ${Math.round(d.temperature_2m_max[0])}°/${Math.round(d.temperature_2m_min[0])}°${rain != null ? ` ☔${rain}%` : ''}</span>`;
+        const el = document.getElementById('wx-' + dayId);
+        if (el) el.innerHTML = wxCache[k];
+      })
+      .catch(() => { wxCache[k] = ''; });
+  });
+}
+
+// ── EXPENSES(實際花費,寫入費用頁同一份資料)──
+const EXP_CAT_FROM_TYPE = {
+  attraction:'景點', meal:'餐廳', snack:'小吃', transport:'交通', hotel:'住宿', ticket:'門票',
+  parking:'停車', toll:'交通', shopping:'購物', scenery:'景點', activity:'門票', gas:'加油'
+};
+function loadExpenses() {
+  onValue(ref(db, `expenses/${projectId}`), snap => {
+    expensesCache = snap.val() || {};
+    updateBudgetBar();
+    if (tripLoaded) renderWhenIdle();
+  });
+}
+function projectMembers() {
+  const list = Object.entries(projectMeta?.members || {}).map(([id, m]) => ({ id, name: m.name || id }));
+  if (currentUser && !list.some(m => m.id === currentUser.uid)) list.push({ id: currentUser.uid, name: currentUd?.name || '我' });
+  return list;
+}
+let expTarget = null;
+window.openExpenseModal = function(dayId, spotId) {
+  if (offlineMode) { showToast('離線模式無法記帳'); return; }
+  const sp = tripData.days[dayId]?.spots?.[spotId];
+  if (!sp) return;
+  expTarget = { dayId, spotId };
+  const cur = sp.costCurrency || baseCurrency;
+  const codes = [...new Set([baseCurrency, cur, ...Object.keys(currencyRates)])];
+  document.getElementById('xe-title').value = sp.name || '';
+  document.getElementById('xe-amount').value = sp.cost || '';
+  document.getElementById('xe-currency').innerHTML = codes.map(c => `<option value="${c}" ${c === cur ? 'selected' : ''}>${c}</option>`).join('');
+  document.getElementById('xe-date').value = tripData.days[dayId].date || todayStr();
+  const members = projectMembers();
+  document.getElementById('xe-paidby').innerHTML = members.map(m =>
+    `<option value="${m.id}" ${m.id === currentUser?.uid ? 'selected' : ''}>${esc(m.name)}</option>`).join('');
+  document.getElementById('xe-split').innerHTML = members.map(m =>
+    `<label><input type="checkbox" value="${m.id}" checked> ${esc(m.name)}</label>`).join('');
+  document.getElementById('xe-note').value = sp.note || '';
+  document.getElementById('exp-modal-mask').classList.add('open');
+};
+window.closeExpenseModal = function() {
+  document.getElementById('exp-modal-mask').classList.remove('open');
+  expTarget = null;
+};
+window.submitExpense = async function() {
+  if (!expTarget) return;
+  const { dayId, spotId } = expTarget;
+  const title = document.getElementById('xe-title').value.trim();
+  const amount = parseFloat(document.getElementById('xe-amount').value);
+  const splitWith = [...document.querySelectorAll('#xe-split input:checked')].map(i => i.value);
+  if (!title) { showToast('請輸入項目'); return; }
+  if (!(amount > 0)) { showToast('請輸入金額'); return; }
+  if (!splitWith.length) { showToast('請至少勾選一位分攤成員'); return; }
+  const sp = tripData.days[dayId]?.spots?.[spotId];
+  const record = {
+    title, amount,
+    currency: document.getElementById('xe-currency').value,
+    category: EXP_CAT_FROM_TYPE[sp?.type] || '其他',
+    date: document.getElementById('xe-date').value,
+    paidBy: document.getElementById('xe-paidby').value,
+    splitMethod: 'equal', splitWith,
+    note: document.getElementById('xe-note').value.trim(),
+    createdAt: Date.now(),
+    source: 'trip', spotRef: `${dayId}/${spotId}`
+  };
+  const expRef = push(ref(db, `expenses/${projectId}`));
+  closeExpenseModal();
+  if (sp) { sp.expenseId = expRef.key; save(); }
+  try {
+    await set(expRef, record);
+    showToast('已記入費用頁 ✓');
+  } catch (e) {
+    console.error(e);
+    showToast('記帳失敗,請稍後再試');
+  }
+};
+
+// ── 重要資訊(航班、住宿、租車、緊急聯絡…)────────
+const INFO_CATS = { flight:'✈️ 航班', hotel:'🏨 住宿', car:'🚗 租車/交通', ticket:'🎫 票券/預約', emergency:'🆘 緊急聯絡', other:'📝 其他' };
+let infoEditId = null;
+function linkify(s) {
+  return s.replace(/https?:\/\/[^\s<]+/g, u => `<a href="${u}" target="_blank" rel="noopener">${u}</a>`);
+}
+window.openInfo = function() {
+  document.getElementById('info-cat').innerHTML = Object.entries(INFO_CATS).map(([k, v]) => `<option value="${k}">${v}</option>`).join('');
+  resetInfoForm();
+  renderInfo();
+  document.getElementById('info-modal-mask').classList.add('open');
+};
+window.closeInfo = function() { document.getElementById('info-modal-mask').classList.remove('open'); };
+function renderInfo() {
+  const items = Object.entries(tripData.info || {});
+  const el = document.getElementById('info-list');
+  if (!items.length) {
+    el.innerHTML = '<div class="pm-empty">還沒有資料。把航班、訂房代號、飯店電話、租車確認、緊急聯絡人記在這裡,全家都看得到。</div>';
+    return;
+  }
+  el.innerHTML = Object.keys(INFO_CATS).map(cat => {
+    const list = items.filter(([, it]) => (it.cat || 'other') === cat).sort((a, b) => (a[1].createdAt || 0) - (b[1].createdAt || 0));
+    if (!list.length) return '';
+    return `<div class="ii-cat">${INFO_CATS[cat]}</div>` + list.map(([id, it]) => `
+      <div class="info-item">
+        <div class="ii-head"><b>${esc(it.title || '')}</b>
+          ${offlineMode ? '' : `<button class="btn-ic" onclick="editInfoItem('${id}')">✏️</button>
+          <button class="btn-ic danger" onclick="deleteInfoItem('${id}')">🗑</button>`}
+        </div>
+        ${it.body ? `<div class="ii-body">${linkify(esc(it.body))}</div>` : ''}
+      </div>`).join('');
+  }).join('');
+}
+window.resetInfoForm = function() {
+  infoEditId = null;
+  document.getElementById('info-title').value = '';
+  document.getElementById('info-body').value = '';
+  document.getElementById('info-save-btn').textContent = '＋ 新增';
+  document.getElementById('info-cancel-btn').style.display = 'none';
+};
+window.editInfoItem = function(id) {
+  const it = tripData.info?.[id];
+  if (!it) return;
+  infoEditId = id;
+  document.getElementById('info-cat').value = it.cat || 'other';
+  document.getElementById('info-title').value = it.title || '';
+  document.getElementById('info-body').value = it.body || '';
+  document.getElementById('info-save-btn').textContent = '💾 儲存';
+  document.getElementById('info-cancel-btn').style.display = '';
+  document.getElementById('info-title').focus();
+};
+window.saveInfoItem = function() {
+  const title = document.getElementById('info-title').value.trim();
+  if (!title) { showToast('請輸入標題'); return; }
+  if (!tripData.info) tripData.info = {};
+  const id = infoEditId || 'info_' + Date.now();
+  tripData.info[id] = {
+    cat: document.getElementById('info-cat').value,
+    title, body: document.getElementById('info-body').value.trim(),
+    createdAt: tripData.info[id]?.createdAt || Date.now()
+  };
+  save();
+  resetInfoForm();
+  renderInfo();
+};
+window.deleteInfoItem = function(id) {
+  const it = tripData.info?.[id];
+  if (!it) return;
+  delete tripData.info[id];
+  save();
+  renderInfo();
+  showUndo(`已刪除「${it.title}」`, () => { (tripData.info ||= {})[id] = it; renderInfo(); });
+};
+
+// ── 行前清單 ──────────────────────────────────
+window.openChecklist = function() {
+  renderChecklist();
+  document.getElementById('check-modal-mask').classList.add('open');
+};
+window.closeChecklist = function() { document.getElementById('check-modal-mask').classList.remove('open'); };
+function renderChecklist() {
+  const items = Object.entries(tripData.checklist || {})
+    .sort((a, b) => (!!a[1].done - !!b[1].done) || ((a[1].createdAt || 0) - (b[1].createdAt || 0)));
+  document.getElementById('check-list').innerHTML = items.length ? items.map(([id, it]) => `
+    <div class="check-item ${it.done ? 'done' : ''}">
+      <input type="checkbox" ${it.done ? 'checked' : ''} ${offlineMode ? 'disabled' : ''} onchange="toggleCheck('${id}', this.checked)">
+      <span class="ci-text">${esc(it.text || '')}</span>
+      ${it.done && it.doneBy ? `<span class="ci-by">${esc(it.doneBy)}</span>` : ''}
+      ${offlineMode ? '' : `<button class="btn-ic danger" onclick="deleteCheck('${id}')">✕</button>`}
+    </div>`).join('')
+    : '<div class="pm-empty">還沒有項目。打包、換匯、買網卡、訂票…家人都能勾選。</div>';
+}
+function updateChecklistBadge() {
+  const items = Object.values(tripData.checklist || {});
+  const btn = document.getElementById('btn-checklist');
+  if (btn) btn.textContent = items.length ? `✅ 清單 ${items.filter(i => i.done).length}/${items.length}` : '✅ 清單';
+}
+window.addCheckItem = function() {
+  const inp = document.getElementById('check-new');
+  const text = inp.value.trim();
+  if (!text) return;
+  if (!tripData.checklist) tripData.checklist = {};
+  tripData.checklist['chk_' + Date.now()] = { text, done: false, createdAt: Date.now() };
+  inp.value = '';
+  save();
+  renderChecklist();
+  updateChecklistBadge();
+};
+window.toggleCheck = function(id, done) {
+  const it = tripData.checklist?.[id];
+  if (!it) return;
+  it.done = done;
+  it.doneBy = done ? (currentUd?.name || '') : null;
+  save();
+  renderChecklist();
+  updateChecklistBadge();
+};
+window.deleteCheck = function(id) {
+  const it = tripData.checklist?.[id];
+  if (!it) return;
+  delete tripData.checklist[id];
+  save();
+  renderChecklist();
+  updateChecklistBadge();
+  showUndo(`已刪除「${it.text}」`, () => { (tripData.checklist ||= {})[id] = it; renderChecklist(); updateChecklistBadge(); });
+};
+
+// ── 候選景點池(還沒排進哪一天)─────────────────
+let poolOpen = false;
+window.togglePool = function() { poolOpen = !poolOpen; renderPool(); };
+function renderPool() {
+  const el = document.getElementById('pool-container');
+  const items = Object.entries(tripData.pool || {}).sort((a, b) => a[0].localeCompare(b[0]));
+  const dayKeys = Object.keys(tripData.days || {}).sort();
+  const dayOpts = dayKeys.map((k, i) => `<option value="${k}">排入 Day ${i+1}</option>`).join('');
+  el.innerHTML = `
+    <div class="pool-card ${poolOpen ? 'open' : ''}">
+      <div class="pool-hd" onclick="togglePool()">
+        <span>💡 候選景點</span><span class="pool-count">${items.length}</span>
+        <span class="pool-hint">想去但還沒排進哪天</span>
+        <span class="day-chevron">${poolOpen ? '▾' : '▸'}</span>
+      </div>
+      ${poolOpen ? `
+      <ul class="pool-list">
+        ${items.map(([id, sp]) => `
+        <li class="pool-item">
+          <span>${(SPOT_TYPES[sp.type] || SPOT_TYPES.attraction).icon}</span>
+          <span class="pi-name">${esc(sp.name || '')}${sp.lat ? '' : ' <span class="sc-nogeo">📍未定位</span>'}</span>
+          ${dayOpts ? `<select onchange="poolToDay('${id}', this.value)"><option value="">排入…</option>${dayOpts}</select>` : ''}
+          <button class="btn-ic danger" onclick="deletePoolItem('${id}')">✕</button>
+        </li>`).join('')}
+      </ul>
+      <div class="add-spot-row">
+        <input class="add-spot-inp" id="pool-new" placeholder="輸入景點名稱後 Enter…(也可在地圖點地點加入)" onkeydown="if(event.key==='Enter')addToPool()">
+        <button class="btn-add-spot" style="background:var(--surface2);border:1px solid var(--border)" onclick="addToPool()">加入</button>
+      </div>` : ''}
+    </div>`;
+}
+window.addToPool = function() {
+  const inp = document.getElementById('pool-new');
+  const name = inp?.value.trim();
+  if (!name) return;
+  inp.value = '';
+  if (!tripData.pool) tripData.pool = {};
+  const id = 'pool_' + Date.now();
+  tripData.pool[id] = { name, type: 'attraction', lat: null, lng: null };
+  save();
+  renderPool();
+  findPlace(name, p => {
+    if (!tripData.pool?.[id]) return;
+    Object.assign(tripData.pool[id], { lat: p.lat, lng: p.lng, placeId: p.placeId || null });
+    save();
+    if (map) drawVisibleDays();
+  }, () => showToast(`找不到「${name}」的位置,排進行程後可再修改名稱`));
+};
+window.poolToDay = function(id, dayId) {
+  const sp = tripData.pool?.[id];
+  if (!sp || !dayId || !tripData.days[dayId]) return;
+  delete tripData.pool[id];
+  if (!tripData.days[dayId].spots) tripData.days[dayId].spots = {};
+  tripData.days[dayId].spots['spot_' + Date.now()] = { time: '', note: '', cost: 0, ...sp };
+  save();
+  const dayKeys = Object.keys(tripData.days).sort();
+  showToast(`已排入 Day ${dayKeys.indexOf(dayId) + 1}：${sp.name}`);
+  setTimeout(() => showDayOnMap(dayId), 300);
+};
+window.deletePoolItem = function(id) {
+  const sp = tripData.pool?.[id];
+  if (!sp) return;
+  delete tripData.pool[id];
+  save();
+  showUndo(`已刪除「${sp.name}」`, () => { (tripData.pool ||= {})[id] = sp; });
+};
+function drawPool() {
+  Object.values(tripData.pool || {}).filter(sp => sp.lat && sp.lng).forEach(sp => {
+    const m = new google.maps.Marker({
+      position: { lat: sp.lat, lng: sp.lng }, map,
+      title: `候選：${sp.name}`,
+      label: { text: '★', color: '#0d1117', fontSize: '10px' },
+      icon: { path: google.maps.SymbolPath.CIRCLE, fillColor: '#d4a843', fillOpacity: .85, strokeColor: '#fff', strokeWeight: 1.5, scale: 8 },
+      zIndex: 40
+    });
+    const iw = new google.maps.InfoWindow({ content: `<div style="color:#111;font-size:12px"><b>${esc(sp.name)}</b><br>候選景點(在左側「💡 候選景點」排進某一天)</div>` });
+    m.addListener('click', () => iw.open(map, m));
+    allMarkers.push(m);
+  });
+}
+
+// ── OFFLINE:存最後一次同步的行程,離線時唯讀顯示 ──
+const tripCacheKey = 'tm_trip_cache_' + projectId;
+function cacheTrip() {
+  try { localStorage.setItem(tripCacheKey, JSON.stringify({ at: Date.now(), data: tripData })); } catch (e) {}
+}
+function showCachedTrip() {
+  if (tripLoaded) return;
+  const bar = document.getElementById('offline-bar');
+  let c = null;
+  try { c = JSON.parse(localStorage.getItem(tripCacheKey)); } catch (e) {}
+  if (!c?.data) {
+    bar.textContent = '📴 連不上網路,這台裝置也還沒存過這個行程。連上網路打開一次後,之後離線也能看。';
+    bar.style.display = '';
+    return;
+  }
+  tripData = c.data;
+  offlineMode = true;
+  document.body.classList.add('readonly');
+  document.getElementById('trip-title').value = tripData.title || '';
+  document.getElementById('budget-total').value = tripData.budget || '';
+  bar.textContent = `📴 離線模式:顯示 ${new Date(c.at).toLocaleString()} 同步的行程(離線時無法修改,連上網路後自動更新)`;
+  bar.style.display = '';
+  renderAll();
 }
 
 // ── MAP TABS ──────────────────────────────────
@@ -394,6 +947,7 @@ function openPoiCardByPlaceId(placeId) {
       <div class="pc-row">
         <select id="pc-day-sel">${dayOptionsHtml()}</select>
         <button class="pc-add" onclick="addSpotFromCard()">＋ 加入</button>
+        <button class="pc-add pc-pool" onclick="addSpotFromCard(true)" title="先放候選景點,之後再排進某天">☆ 候選</button>
       </div>`);
   });
 }
@@ -409,15 +963,26 @@ function openPoiCardByLatLng(latLng) {
       <div class="pc-row">
         <select id="pc-day-sel">${dayOptionsHtml()}</select>
         <button class="pc-add" onclick="addSpotFromCard()">＋ 加入</button>
+        <button class="pc-add pc-pool" onclick="addSpotFromCard(true)" title="先放候選景點,之後再排進某天">☆ 候選</button>
       </div>`);
   });
 }
 
-window.addSpotFromCard = function() {
+window.addSpotFromCard = function(toPool) {
   if (!pendingPlace) return;
   const nameInp = document.getElementById('pc-name-inp');
   const name = nameInp ? nameInp.value.trim() : pendingPlace.name;
   if (!name) { showToast('請輸入景點名稱'); return; }
+  if (toPool) {
+    if (!tripData.pool) tripData.pool = {};
+    tripData.pool['pool_' + Date.now()] = {
+      name, type: 'attraction', lat: pendingPlace.lat, lng: pendingPlace.lng, placeId: pendingPlace.placeId || null
+    };
+    save();
+    closePoiCard();
+    showToast(`已加入候選景點：${name} ☆`);
+    return;
+  }
   const dayId = document.getElementById('pc-day-sel')?.value;
   if (!dayId || !tripData.days[dayId]) { showToast('請先新增天數'); return; }
   if (!tripData.days[dayId].spots) tripData.days[dayId].spots = {};
@@ -523,6 +1088,8 @@ function drawVisibleDays() {
     markerCount += r.markers;
     r.fitPts.forEach(p => { bounds.extend(p); fitCount++; });
   }
+
+  drawPool();
 
   const navBtn = document.getElementById('map-nav-btn');
   navBtn.style.display = (activeDay && markerCount) ? 'flex' : 'none';
@@ -743,34 +1310,37 @@ function saveSpotLocation(dayId, spotId, name, lat, lng, placeId) {
 
 // Business/POI names resolve much better via Places search than the
 // address-oriented Geocoder, so try Places first and fall back.
-function geocodeAndSave(dayId, spotId, name) {
-  if (!window.google || !map) {
-    showToast('地圖尚未載入，請稍後再試 🗺');
-    return;
-  }
+function findPlace(name, onFound, onFail) {
+  if (!window.google || !map) { showToast('地圖尚未載入，請稍後再試 🗺'); return; }
   const svc = new google.maps.places.PlacesService(map);
   svc.findPlaceFromQuery({ query: name, fields: ['name','geometry','place_id'] }, (results, status) => {
     const p = results?.[0];
     if (status === google.maps.places.PlacesServiceStatus.OK && p?.geometry) {
-      saveSpotLocation(dayId, spotId, name, p.geometry.location.lat(), p.geometry.location.lng(), p.place_id);
+      onFound({ lat: p.geometry.location.lat(), lng: p.geometry.location.lng(), placeId: p.place_id });
     } else {
-      geocodeFallback(dayId, spotId, name, false);
+      geocodeFallback(name, false, onFound, onFail);
     }
   });
 }
 
-function geocodeFallback(dayId, spotId, name, retried) {
+function geocodeFallback(name, retried, onFound, onFail) {
   new google.maps.Geocoder().geocode({ address: retried ? name + ' 日本' : name, region: 'jp' }, (results, status) => {
     if (status === 'OK' && results[0]) {
       const loc = results[0].geometry.location;
-      saveSpotLocation(dayId, spotId, name, loc.lat(), loc.lng(), null);
+      onFound({ lat: loc.lat(), lng: loc.lng(), placeId: null });
     } else if (status === 'ZERO_RESULTS' && !retried) {
-      geocodeFallback(dayId, spotId, name, true);
+      geocodeFallback(name, true, onFound, onFail);
     } else {
-      showToast(`找不到「${name}」的位置，請換個名稱試試`);
       console.warn('Geocode failed:', name, status);
+      onFail?.();
     }
   });
+}
+
+function geocodeAndSave(dayId, spotId, name) {
+  findPlace(name,
+    p => saveSpotLocation(dayId, spotId, name, p.lat, p.lng, p.placeId),
+    () => showToast(`找不到「${name}」的位置，請換個名稱試試`));
 }
 
 function geocodeSpot(dayId, spotId, name) { if (name) geocodeAndSave(dayId, spotId, name); }
@@ -785,10 +1355,13 @@ window.addDay = function() {
 };
 
 window.deleteDay = function(dayId) {
-  if (!confirm('確定刪除這一天的行程嗎？')) return;
+  const d = tripData.days[dayId];
+  if (!d) return;
+  const n = Object.keys(tripData.days).sort().indexOf(dayId) + 1;
   delete tripData.days[dayId];
   if (activeDay === dayId) activeDay = null;
   save();
+  showUndo(`已刪除 Day ${n}`, () => { tripData.days[dayId] = d; });
 };
 
 window.updateDayDate = function(dayId, val) {
@@ -835,16 +1408,23 @@ window.quickAdd = function(dayId) {
 
 window.updateSpot = function(dayId, spotId, field, value) {
   if (!tripData.days[dayId]?.spots?.[spotId]) return;
-  tripData.days[dayId].spots[spotId][field] = field === 'cost' ? (parseFloat(value)||0) : value;
+  tripData.days[dayId].spots[spotId][field] =
+    field === 'cost' ? (parseFloat(value)||0) : field === 'stay' ? (parseInt(value)||0) : value;
   save();
   if (field === 'cost' || field === 'costCurrency' || field === 'type') updateBudgetBar();
 };
 
 window.deleteSpot = function(dayId, spotId) {
+  const sp = tripData.days[dayId]?.spots?.[spotId];
+  if (!sp) return;
   delete tripData.days[dayId].spots[spotId];
+  if (openSpot === dayId + '/' + spotId) openSpot = null;
   save();
   if (activeDay === dayId) showDayOnMap(dayId);
-  showToast('已刪除景點');
+  showUndo(`已刪除「${sp.name || '景點'}」`, () => {
+    if (!tripData.days[dayId]) return;
+    (tripData.days[dayId].spots ||= {})[spotId] = sp;
+  });
 };
 
 // ── REORDER (mobile-friendly) ─────────────────
@@ -919,26 +1499,32 @@ window.toggleAllDays = function() {
 
 // ── BUDGET BAR ────────────────────────────────
 function updateBudgetBar() {
-  let spent = 0;
+  // 預估 = 行程裡景點填的費用;實際 = 費用頁的記帳。剩餘以實際計算
+  let est = 0;
   if (tripData.days) Object.values(tripData.days).forEach(d => {
     if (d.spots) Object.values(d.spots).forEach(s => {
-      spent += toBase(parseFloat(s.cost)||0, s.costCurrency||baseCurrency);
+      est += toBase(parseFloat(s.cost)||0, s.costCurrency||baseCurrency);
     });
   });
+  const actual = Object.values(expensesCache).reduce((s, e) => s + toBase(parseFloat(e.amount)||0, e.currency||baseCurrency), 0);
   const budget = parseFloat(tripData.budget) || 0;
-  const remain = budget - spent;
-  const pct    = budget > 0 ? Math.min(spent / budget * 100, 100) : 0;
+  const remain = budget - actual;
+  const pct    = budget > 0 ? Math.min(actual / budget * 100, 100) : 0;
   const sym = symbolFor(baseCurrency);
 
   const budgetLbl = document.getElementById('budget-cur-lbl');
   if (budgetLbl) budgetLbl.textContent = baseCurrency;
-  document.getElementById('spent-val').textContent  = `${sym}${Math.round(spent).toLocaleString()}`;
-  document.getElementById('budget-val').textContent = `${sym}${Math.round(budget).toLocaleString()}`;
+  document.getElementById('est-val').textContent    = `${sym}${Math.round(est).toLocaleString()}`;
+  document.getElementById('est-val').style.color    = budget > 0 && est > budget ? '#f85149' : 'var(--gold)';
+  document.getElementById('actual-val').textContent = `${sym}${Math.round(actual).toLocaleString()}`;
   document.getElementById('remain-val').textContent = `${sym}${Math.abs(Math.round(remain)).toLocaleString()}`;
   document.getElementById('remain-lbl').textContent = remain >= 0 ? '剩餘' : '超支';
   document.getElementById('remain-val').style.color = remain >= 0 ? '#39d353' : '#f85149';
   document.getElementById('budget-bar-fill').style.width = pct + '%';
   document.getElementById('budget-bar-fill').style.background = pct > 90 ? '#f85149' : 'linear-gradient(90deg,#4a7c59,#d4a843)';
+  const mark = document.getElementById('budget-est-mark');
+  mark.style.display = budget > 0 && est > 0 ? 'block' : 'none';
+  mark.style.left = `calc(${Math.min(est / (budget || 1) * 100, 100)}% - 2px)`;
 }
 
 // ── LONG-PRESS DRAG REORDER (touch + mouse) ───
@@ -990,6 +1576,8 @@ function initSpotDrag() {
       const dropY = ev.clientY;
       cleanup();
       if (!wasActive) return;
+      window.__justDragged = true;
+      setTimeout(() => { window.__justDragged = false; }, 400);
       const spots = tripData.days[dayId]?.spots;
       if (!spots) return;
       const keys = Object.keys(spots).sort();
@@ -1599,6 +2187,94 @@ body.no-select { user-select:none; -webkit-user-select:none; }
 .toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%) translateY(50px); background:var(--surface); border:1px solid var(--border); color:var(--text); padding:9px 18px; border-radius:20px; font-size:.8rem; opacity:0; transition:transform .3s,opacity .3s; z-index:999; pointer-events:none; white-space:nowrap; }
 .toast.show { transform:translateX(-50%) translateY(0); opacity:1; }
 
+/* ── COMPACT SPOT CARD / EDIT PANEL ── */
+.spot-item { flex-wrap: wrap; }
+.spot-body { cursor: pointer; }
+.sc-row1 { display:flex; gap:6px; align-items:center; min-width:0; }
+.sc-name { font-size:.88rem; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.sc-row2 { display:flex; flex-wrap:wrap; gap:3px 8px; align-items:center; margin-top:3px; font-size:.72rem; color:var(--muted); }
+.sc-time { color:var(--text); font-weight:600; }
+.sc-time.eta { color:var(--muted); font-style:italic; font-weight:400; }
+.sc-stay { background:rgba(255,255,255,.06); border-radius:4px; padding:0 5px; }
+.sc-cost { color:var(--gold); }
+.sc-booked { color:var(--green); }
+.sc-nogeo { color:#f0883e; font-size:.68rem; }
+.sc-note { flex-basis:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.next-pill, .today-pill { font-size:.6rem; font-weight:700; border-radius:4px; padding:1px 6px; white-space:nowrap; flex-shrink:0; }
+.next-pill { background:var(--accent); color:#fff; }
+.today-pill { background:var(--green); color:#0d1117; }
+.spot-item.is-next { background:rgba(247,129,102,.08); box-shadow:inset 3px 0 0 var(--accent); }
+.day-card.today { border-color:rgba(57,211,83,.5); }
+.spot-item .spot-side { flex-direction:row; align-self:center; gap:6px; }
+.btn-spot-nav, .btn-spot-toggle { background:transparent; border:1px solid var(--border); border-radius:6px; color:var(--muted); cursor:pointer; width:30px; height:30px; font-size:.85rem; font-family:inherit; }
+.btn-spot-nav:hover, .btn-spot-toggle:hover { background:var(--surface2); color:var(--text); }
+.spot-item.open { background:rgba(255,255,255,.03); cursor:default; }
+.spot-edit { flex-basis:100%; display:flex; flex-direction:column; gap:10px; padding:8px 0 4px 34px; }
+.se-row { display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end; }
+.se-field { display:flex; flex-direction:column; gap:3px; font-size:.62rem; color:var(--muted); }
+.spot-edit .spot-name-inp { border-bottom:1px solid rgba(255,255,255,.15); min-width:0; }
+.spot-edit .spot-time { width:92px; color:var(--text); }
+.spot-stay { background:transparent; border:none; border-bottom:1px dashed rgba(255,255,255,.15); color:var(--text); font-size:.72rem; width:64px; outline:none; font-family:inherit; }
+.spot-edit .spot-note { padding:6px 8px; }
+.se-actions { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+.spot-edit .spot-move-sel { width:auto; padding:4px 6px; height:auto; }
+.day-wx { font-size:.7rem; color:var(--muted); white-space:nowrap; }
+
+/* ── OFFLINE / NEXT-SPOT BARS ── */
+#offline-bar { background:rgba(212,168,67,.12); border:1px solid rgba(212,168,67,.4); color:var(--gold); border-radius:8px; padding:8px 10px; font-size:.75rem; line-height:1.5; }
+#next-bar { position:sticky; top:0; z-index:5; align-items:center; gap:8px; background:linear-gradient(135deg,rgba(247,129,102,.25),rgba(212,168,67,.25)), var(--night); border:1px solid rgba(247,129,102,.45); border-radius:10px; padding:8px 10px; font-size:.8rem; }
+#next-bar .nb-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+#next-bar .nb-time { color:var(--gold); white-space:nowrap; }
+#next-bar .nb-go { margin-left:auto; background:var(--accent); color:#fff; border:none; border-radius:8px; padding:8px 14px; font-weight:700; cursor:pointer; font-family:inherit; flex-shrink:0; }
+body.readonly .spot-edit, body.readonly .add-spot-row, body.readonly .btn-add-day, body.readonly .btn-spot-toggle,
+body.readonly .day-hd-right .danger, body.readonly .pool-card { display:none; }
+body.readonly .day-date, body.readonly #budget-total, body.readonly #trip-title { pointer-events:none; }
+
+/* ── POOL (候選景點) ── */
+.pool-card { background:var(--surface); border:1px dashed rgba(255,255,255,.15); border-radius:var(--r); }
+.pool-hd { display:flex; align-items:center; gap:8px; padding:10px 12px; cursor:pointer; font-size:.8rem; font-weight:600; user-select:none; }
+.pool-count { background:var(--surface2); border-radius:10px; padding:0 7px; font-size:.7rem; color:var(--gold); }
+.pool-hint { color:var(--muted); font-weight:400; font-size:.68rem; margin-right:auto; }
+.pool-list { list-style:none; }
+.pool-item { display:flex; align-items:center; gap:8px; padding:8px 12px; border-top:1px solid rgba(255,255,255,.04); font-size:.82rem; }
+.pool-item .pi-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.pool-item select { background:var(--surface2); border:1px solid var(--border); border-radius:6px; color:var(--text); font-size:.7rem; padding:3px; font-family:inherit; }
+#poi-card .pc-pool { background:var(--surface2); border:1px solid var(--border); color:var(--gold); }
+
+/* ── UNDO BAR ── */
+#undo-bar { position:fixed; left:50%; bottom:70px; transform:translateX(-50%) translateY(120px); background:var(--surface2); border:1px solid var(--border); border-radius:24px; padding:6px 6px 6px 16px; display:flex; align-items:center; gap:12px; font-size:.82rem; z-index:998; opacity:0; transition:transform .25s, opacity .25s; box-shadow:0 8px 24px rgba(0,0,0,.5); max-width:calc(100% - 32px); pointer-events:none; }
+#undo-bar.show { transform:translateX(-50%) translateY(0); opacity:1; pointer-events:auto; }
+#undo-text { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+#undo-bar button { background:var(--accent); color:#fff; border:none; border-radius:16px; padding:8px 16px; font-weight:700; cursor:pointer; font-family:inherit; flex-shrink:0; }
+
+/* ── BUDGET ESTIMATE MARK ── */
+.budget-bar-track { position:relative; }
+#budget-est-mark { position:absolute; top:0; width:3px; height:100%; background:var(--gold); display:none; box-shadow:0 0 0 1px rgba(0,0,0,.5); }
+
+/* ── FORMS (expense / info / checklist) ── */
+.form-body { display:flex; flex-direction:column; gap:10px; }
+.form-body label { display:flex; flex-direction:column; gap:4px; font-size:.72rem; color:var(--muted); }
+.form-body input, .form-body select, .info-form input, .info-form select, .info-form textarea, #check-new {
+  background:var(--surface2); border:1px solid var(--border); border-radius:6px; color:var(--text); padding:8px; font-size:.85rem; font-family:inherit; outline:none; min-width:0; }
+.form-row { display:flex; gap:8px; align-items:flex-end; }
+.form-label { font-size:.72rem; color:var(--muted); }
+.chk-group { display:flex; flex-wrap:wrap; gap:6px 16px; }
+.chk-group label { flex-direction:row !important; align-items:center; gap:6px; color:var(--text) !important; font-size:.85rem !important; }
+.chk-group input { width:18px; height:18px; accent-color:var(--accent); }
+.ii-cat { font-size:.72rem; color:var(--gold); margin:12px 0 6px; font-weight:700; }
+.info-item { background:var(--surface2); border-radius:8px; padding:10px; margin-bottom:8px; }
+.ii-head { display:flex; align-items:center; gap:6px; }
+.ii-head b { flex:1; font-size:.86rem; }
+.ii-body { font-size:.8rem; color:var(--muted); white-space:pre-wrap; margin-top:4px; word-break:break-word; line-height:1.6; }
+.ii-body a { color:#58a6ff; }
+.info-form { display:flex; flex-direction:column; gap:8px; border-top:1px solid var(--border); padding-top:12px; margin-top:8px; }
+#check-list { margin-top:10px; }
+.check-item { display:flex; align-items:center; gap:10px; padding:10px 4px; border-bottom:1px solid rgba(255,255,255,.05); font-size:.88rem; }
+.check-item input { width:20px; height:20px; accent-color:var(--green); flex-shrink:0; }
+.check-item.done .ci-text { text-decoration:line-through; color:var(--muted); }
+.ci-text { flex:1; word-break:break-word; }
+.ci-by { font-size:.65rem; color:var(--muted); }
+
 /* ── MOBILE ── */
 @media (max-width: 768px) {
   .main { grid-template-columns: 1fr; position: relative; }
@@ -1635,14 +2311,13 @@ body.no-select { user-select:none; -webkit-user-select:none; }
   nav { padding: 0 10px; gap: 8px; height: 50px; }
   .nav-logo { display: none; }
   .nav-back { font-size: 1.2rem; padding: 6px 4px; }
-  .nav-actions .btn-nav:not(.map-btn) { display: none; }
+  .lbl-wide { display: none; }
   .btn-nav { padding: 8px 12px; font-size: .82rem; }
 
   /* 預算列:壓成一行,「預算」數字與輸入框重複故隱藏 */
   .budget-strip { padding: 6px 12px; gap: 4px 12px; }
   .budget-field input { width: 80px; }
   .budget-nums { gap: 12px; }
-  .budget-num:nth-child(2) { display: none; }
   .budget-num .val { font-size: .82rem; }
   .bar-wrap { flex-basis: 100%; }
 
@@ -1662,7 +2337,7 @@ body.no-select { user-select:none; -webkit-user-select:none; }
 
   /* 景點卡:類型圖示與下拉重複 → 隱藏圖示;名稱獨佔一行;備註換到第三行 */
   .spot-item { padding: 10px 8px 10px 10px; gap: 8px; }
-  .spot-type-icon { display: none; }
+  .spot-type-icon { width: 26px; height: 26px; font-size: .9rem; }
   .spot-row1 { flex-wrap: wrap; margin-bottom: 6px; }
   .spot-name-inp { min-width: 0; flex: 1 1 100%; font-weight: 600; }
   .spot-type-sel { padding: 4px 6px; }
@@ -1673,7 +2348,18 @@ body.no-select { user-select:none; -webkit-user-select:none; }
   .spot-note { order: 3; flex: 1 1 100%; padding: 6px 8px; }
   .spot-warn { font-size: .78rem; }
   .spot-side { gap: 6px; }
-  .btn-spot-del, .btn-spot-detail { font-size: 1.05rem; width: 38px; height: 38px; padding: 0; }
+  .btn-spot-nav, .btn-spot-toggle { width: 40px; height: 40px; font-size: 1.05rem; }
+  .sc-name { font-size: .98rem; }
+  .sc-row2 { font-size: .8rem; }
+  .spot-edit { padding-left: 0; }
+  .se-field { font-size: .74rem; }
+  .spot-stay { width: 80px; }
+  .spot-edit .spot-time { width: 124px; }
+  .se-actions .btn-ic, .se-actions .spot-move-sel { min-height: 40px; }
+  .pool-hd { padding: 12px; font-size: .88rem; }
+  .pool-item { padding: 10px 12px; font-size: .92rem; }
+  #undo-bar { bottom: 90px; }
+  .form-row { flex-wrap: wrap; }
   .spot-move-sel { width: 38px; height: 34px; }
 
   /* 新增列 */
@@ -1709,7 +2395,7 @@ body.no-select { user-select:none; -webkit-user-select:none; }
   <input class="nav-title-input" id="trip-title" placeholder="行程名稱" oninput="saveMeta()">
   <div class="nav-actions">
     <button class="btn-nav map-btn" id="btn-toggle-map" onclick="toggleMap()">🗺 地圖</button>
-    <button class="btn-nav" onclick="copyShare()">🔗 分享</button>
+    <button class="btn-nav" onclick="copyShare()" title="複製分享連結">🔗<span class="lbl-wide"> 分享</span></button>
     <div class="user-dot" id="user-name">…</div>
   </div>
 </nav>
@@ -1722,13 +2408,13 @@ body.no-select { user-select:none; -webkit-user-select:none; }
     <button class="btn-currency-link" onclick="location.href='expenses.html?project='+(new URLSearchParams(location.search).get('project')||'main')+'&tab=currency'" title="幣別設定（本專案專屬，不影響其他專案）">💱</button>
   </div>
   <div class="budget-nums">
-    <div class="budget-num">
-      <span class="lbl">已花費</span>
-      <span class="val" id="spent-val" style="color:var(--accent)">¥0</span>
+    <div class="budget-num" title="行程裡每個景點填的費用加總(計畫)">
+      <span class="lbl">預估</span>
+      <span class="val" id="est-val" style="color:var(--gold)">¥0</span>
     </div>
-    <div class="budget-num">
-      <span class="lbl">預算</span>
-      <span class="val" id="budget-val" style="color:var(--muted)">¥0</span>
+    <div class="budget-num" title="費用頁實際記帳的加總">
+      <span class="lbl">實際</span>
+      <span class="val" id="actual-val" style="color:var(--accent)">¥0</span>
     </div>
     <div class="budget-num">
       <span class="lbl" id="remain-lbl">剩餘</span>
@@ -1736,7 +2422,7 @@ body.no-select { user-select:none; -webkit-user-select:none; }
     </div>
   </div>
   <div class="bar-wrap">
-    <div class="budget-bar-track"><div id="budget-bar-fill"></div></div>
+    <div class="budget-bar-track"><div id="budget-bar-fill"></div><div id="budget-est-mark" title="預估花費位置"></div></div>
   </div>
 </div>
 
@@ -1748,8 +2434,13 @@ body.no-select { user-select:none; -webkit-user-select:none; }
       <button class="btn-share" onclick="toggleAllDays()">⬍ 展開/收合</button>
       <button class="btn-share" onclick="location.href='poi.html?project='+(new URLSearchParams(location.search).get('project')||'main')">📁 文件</button>
       <button class="btn-share" id="btn-members" style="display:none" onclick="openMembers()">👥 成員</button>
-      <button class="btn-share" onclick="copyShare()">🔗 複製分享連結</button>
+      <button class="btn-share" id="btn-today" style="display:none" onclick="jumpToToday()">📍 今天</button>
+      <button class="btn-share" onclick="openInfo()">📌 資訊</button>
+      <button class="btn-share" id="btn-checklist" onclick="openChecklist()">✅ 清單</button>
     </div>
+    <div id="offline-bar" style="display:none"></div>
+    <div id="next-bar" style="display:none"></div>
+    <div id="pool-container"></div>
     <div id="days-container">
       <div class="empty-state"><div class="ei">⏳</div><p>載入中…</p></div>
     </div>
@@ -1815,6 +2506,78 @@ body.no-select { user-select:none; -webkit-user-select:none; }
     </div>
   </div>
 </div>
+
+<!-- EXPENSE MODAL (記一筆實際花費) -->
+<div class="modal-mask" id="exp-modal-mask" onclick="if(event.target===this)closeExpenseModal()">
+  <div class="photo-modal" style="width:440px">
+    <div class="pm-head">
+      <span class="pm-title">💳 記一筆實際花費</span>
+      <button class="pm-close" onclick="closeExpenseModal()">✕</button>
+    </div>
+    <div class="pm-body form-body">
+      <label>項目<input id="xe-title"></label>
+      <div class="form-row">
+        <label style="flex:2">金額<input id="xe-amount" type="number" inputmode="decimal"></label>
+        <label style="flex:1">幣別<select id="xe-currency"></select></label>
+      </div>
+      <div class="form-row">
+        <label style="flex:1">日期<input id="xe-date" type="date"></label>
+        <label style="flex:1">付款人<select id="xe-paidby"></select></label>
+      </div>
+      <div class="form-label">平均分攤給</div>
+      <div id="xe-split" class="chk-group"></div>
+      <label>備註<input id="xe-note"></label>
+    </div>
+    <div class="pm-foot">
+      <button class="pm-upload-btn" onclick="submitExpense()">記帳</button>
+      <span class="pm-hint">會出現在費用頁，可在那裡修改分攤方式</span>
+    </div>
+  </div>
+</div>
+
+<!-- INFO MODAL (重要資訊) -->
+<div class="modal-mask" id="info-modal-mask" onclick="if(event.target===this)closeInfo()">
+  <div class="photo-modal" style="width:560px">
+    <div class="pm-head">
+      <span class="pm-title">📌 重要資訊</span>
+      <button class="pm-close" onclick="closeInfo()">✕</button>
+    </div>
+    <div class="pm-body">
+      <div id="info-list"></div>
+      <div class="info-form">
+        <div class="form-row">
+          <select id="info-cat" style="flex:1"></select>
+          <input id="info-title" placeholder="標題(例:去程 CI110)" style="flex:2">
+        </div>
+        <textarea id="info-body" rows="3" placeholder="內容:時間、訂位代號、地址、電話…"></textarea>
+        <div class="form-row">
+          <button class="pm-upload-btn" id="info-save-btn" onclick="saveInfoItem()">＋ 新增</button>
+          <button class="btn-share" id="info-cancel-btn" style="display:none" onclick="resetInfoForm()">取消編輯</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- CHECKLIST MODAL (行前清單) -->
+<div class="modal-mask" id="check-modal-mask" onclick="if(event.target===this)closeChecklist()">
+  <div class="photo-modal" style="width:480px">
+    <div class="pm-head">
+      <span class="pm-title">✅ 行前清單</span>
+      <button class="pm-close" onclick="closeChecklist()">✕</button>
+    </div>
+    <div class="pm-body">
+      <div class="form-row">
+        <input id="check-new" placeholder="新增項目後 Enter(例:換日幣、買網卡)" style="flex:1" onkeydown="if(event.key==='Enter')addCheckItem()">
+        <button class="pm-upload-btn" onclick="addCheckItem()">新增</button>
+      </div>
+      <div id="check-list"></div>
+    </div>
+  </div>
+</div>
+
+<!-- UNDO BAR -->
+<div id="undo-bar"><span id="undo-text"></span><button onclick="doUndo()">復原</button></div>
 
 <!-- LIGHTBOX -->
 <div id="lightbox" onclick="this.classList.remove('open')"><img id="lightbox-img" src="" alt=""></div>
