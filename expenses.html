@@ -2,7 +2,7 @@
 <html lang="zh-TW">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>費用明細｜TripMaster</title>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700;900&family=Playfair+Display:wght@700&display=swap" rel="stylesheet">
 
@@ -659,6 +659,22 @@ nav{background:rgba(13,17,23,.95);backdrop-filter:blur(16px);border-bottom:1px s
 .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%) translateY(50px);background:var(--surface);border:1px solid var(--border);color:var(--text);padding:10px 20px;border-radius:20px;font-size:.82rem;opacity:0;transition:transform .3s,opacity .3s;z-index:999;pointer-events:none;}
 .toast.show{transform:translateX(-50%) translateY(0);opacity:1;}
 
+@media(max-width:768px){
+  nav{padding:0 12px;height:52px;} .nav-logo{display:none;} .nav-back{font-size:.9rem;}
+  #project-title{max-width:55vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .page-header{padding:16px 16px 12px;} .page-header h1{font-size:1.3rem;}
+  /* 「新增費用」改成右下角浮動鈕,記帳不用捲回頂端 */
+  .btn-add-exp{position:fixed;right:16px;bottom:calc(16px + env(safe-area-inset-bottom));z-index:500;border-radius:28px;padding:15px 22px;font-size:.95rem;box-shadow:0 8px 24px rgba(0,0,0,.5);}
+  .main-content{padding:0 16px 110px;}
+  .stats-bar{padding:0 16px 14px;gap:10px;} .stat-pill{min-width:0;padding:10px 14px;} .stat-pill .val{font-size:1.25rem;}
+  .tabs{overflow-x:auto;flex-wrap:nowrap;scrollbar-width:none;margin:0 -16px 16px;padding:0 16px;}
+  .tabs::-webkit-scrollbar{display:none;}
+  .tab-btn{flex-shrink:0;white-space:nowrap;padding:10px 14px;}
+  .expense-card{padding:12px;} .btn-del-exp{align-self:center;}
+  .cur-row{padding:10px;} .cur-rate-inp{width:90px;} .cur-add-row select{max-width:none;}
+  .member-check{min-height:40px;margin-right:14px;}
+  .member-check input{width:20px;height:20px;}
+}
 @media(max-width:600px){.form-grid{grid-template-columns:1fr;}.cat-row{grid-template-columns:100px 70px 1fr;}.tx-row{gap:6px;}.tx-amount{margin-left:0;width:100%;}}
 </style>
 <link rel="stylesheet" href="ui.css">

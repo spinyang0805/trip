@@ -34,12 +34,37 @@
     d.dispatchEvent(new MouseEvent('click', { bubbles: true })); // 遮罩 onclick 只認 target===this
   }
 
+  // ── 返回鍵:開啟的抽屜/地圖等「層」寫進瀏覽器歷史,按返回先關最上層 ──
+  // push(tag, onBack):開一層;release(tag):使用者自己關掉時,把對應的歷史吃掉
+  const layers = [];
+  let ignorePop = 0;
+  window.tmHistory = {
+    push(tag, onBack) {
+      history.pushState({ tmLayer: layers.length + 1 }, '');
+      layers.push({ tag, onBack });
+    },
+    release(tag) {
+      const top = layers[layers.length - 1];
+      if (top && top.tag === tag) { layers.pop(); ignorePop++; history.back(); }
+      else { const i = layers.findIndex(l => l.tag === tag); if (i >= 0) layers.splice(i, 1); }
+    },
+    has(tag) { return layers.some(l => l.tag === tag); },
+  };
+  window.addEventListener('popstate', () => {
+    if (ignorePop > 0) { ignorePop--; return; }
+    const top = layers.pop();
+    if (top) top.onBack();
+  });
+
   const openers = new WeakMap();
   function onDialogChange(d) {
     const shown = isShown(d);
     if (shown && !d.dataset.uiOpen) {
       d.dataset.uiOpen = '1';
       openers.set(d, document.activeElement);
+      const tag = 'dlg:' + (d.id || Math.random());
+      d.dataset.uiTag = tag;
+      window.tmHistory.push(tag, () => { delete d.dataset.uiTag; if (isShown(d)) closeDialog(d); });
       const panel = panelOf(d);
       panel.setAttribute('role', 'dialog');
       panel.setAttribute('aria-modal', 'true');
@@ -53,6 +78,8 @@
       setTimeout(() => { if (!panel.contains(document.activeElement)) panel.focus({ preventScroll: true }); }, 0);
     } else if (!shown && d.dataset.uiOpen) {
       delete d.dataset.uiOpen;
+      if (d.dataset.uiTag) { window.tmHistory.release(d.dataset.uiTag); delete d.dataset.uiTag; }
+      panelOf(d).style.transform = '';
       const back = openers.get(d);
       if (back && document.contains(back) && typeof back.focus === 'function') back.focus({ preventScroll: true });
     }
@@ -88,6 +115,55 @@
       else if (e.shiftKey && (document.activeElement === first || document.activeElement === panel)) { e.preventDefault(); last.focus(); }
       else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
     }
+  });
+
+  // ── 手機抽屜:按住頂端(把手/標題列)往下滑關閉;✕ 與返回鍵仍可用 ──
+  const mobile = () => matchMedia('(max-width: 768px)').matches;
+  let drag = null;
+  document.addEventListener('pointerdown', e => {
+    if (!mobile() || e.pointerType === 'mouse') return;
+    const d = topDialog();
+    if (!d || d.id === 'lightbox') return;
+    const panel = panelOf(d);
+    if (!panel.contains(e.target) || e.target.closest('input, select, textarea, button, a')) return;
+    const inHead = e.target.closest('.pm-head, h2') || e.clientY - panel.getBoundingClientRect().top < 28;
+    if (!inHead) return;
+    drag = { d, panel, y0: e.clientY, t0: performance.now(), dy: 0 };
+    panel.classList.add('sheet-dragging');
+  }, { passive: true });
+  document.addEventListener('pointermove', e => {
+    if (!drag) return;
+    drag.dy = Math.max(0, e.clientY - drag.y0);
+    drag.panel.style.transform = `translateY(${drag.dy}px)`;
+  }, { passive: true });
+  const endDrag = cancel => {
+    if (!drag) return;
+    const { d, panel, dy, t0 } = drag;
+    drag = null;
+    panel.classList.remove('sheet-dragging');
+    panel.classList.add('sheet-releasing');
+    const fast = dy / (performance.now() - t0) > 0.6;
+    if (!cancel && (dy > 110 || (dy > 40 && fast))) {
+      panel.style.transform = 'translateY(100%)';
+      setTimeout(() => { closeDialog(d); panel.classList.remove('sheet-releasing'); panel.style.transform = ''; }, 200);
+    } else {
+      panel.style.transform = '';
+      setTimeout(() => panel.classList.remove('sheet-releasing'), 250);
+    }
+  };
+  document.addEventListener('pointerup', () => endDrag(false));
+  document.addEventListener('pointercancel', () => endDrag(true));
+
+  // 鍵盤彈出時:抽屜高度跟著可視區縮,正在輸入的欄位捲到看得到的位置
+  if (window.visualViewport) {
+    const setVh = () => document.documentElement.style.setProperty('--vvh', visualViewport.height + 'px');
+    visualViewport.addEventListener('resize', setVh);
+    setVh();
+  }
+  document.addEventListener('focusin', e => {
+    if (!mobile() || !e.target.matches('input, select, textarea')) return;
+    if (!e.target.closest('.photo-modal, .modal')) return;
+    setTimeout(() => e.target.scrollIntoView({ block: 'center', behavior: 'smooth' }), 300);
   });
 
   // ── 可點的標題列:鍵盤 Enter/Space 可展開收合 ──────────

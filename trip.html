@@ -2,7 +2,7 @@
 <html lang="zh-TW">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>行程規劃｜TripMaster</title>
 <script>
 // Maps API callback stub: the real init lives in the module script below,
@@ -2482,6 +2482,23 @@ body.readonly .day-date, body.readonly #budget-total, body.readonly #trip-title 
   .main { grid-template-columns: 1fr; position: relative; }
   #split-handle { display: none; }
 
+  /* 底部導覽列:常用功能放在拇指搆得到的地方 */
+  nav.tabbar { display: flex; flex-shrink: 0; background: rgba(13,17,23,.98); border-top: 1px solid var(--border); border-bottom: none;
+    height: auto; gap: 0; padding: 4px 4px env(safe-area-inset-bottom); z-index: 200; }
+  .tb-item { flex: 1; min-height: 56px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+    background: none; border: none; color: var(--muted); font-size: .72rem; font-family: inherit; text-decoration: none; cursor: pointer; border-radius: 10px; }
+  .tb-item .tb-ic { font-size: 1.25rem; line-height: 1; filter: grayscale(.6); opacity: .8; }
+  .tb-item.active { color: var(--accent); font-weight: 700; }
+  .tb-item.active .tb-ic { filter: none; opacity: 1; }
+  .tb-item:active { background: rgba(255,255,255,.06); }
+  /* 已移到底部列/「更多」的按鈕,頂端不再重複 */
+  .tb-secondary, #btn-toggle-map, nav .btn-nav[onclick="copyShare()"] { display: none !important; }
+  /* 地圖上的天數標籤:單行左右滑 */
+  .map-day-tabs { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; right: 12px; max-width: none; padding-bottom: 4px; -webkit-overflow-scrolling: touch; }
+  .map-day-tabs::-webkit-scrollbar { display: none; }
+  .map-tab { flex-shrink: 0; }
+  #undo-bar { bottom: calc(76px + env(safe-area-inset-bottom)); }
+
   #itinerary-panel {
     position: absolute; inset: 0;
     z-index: 10;
@@ -2561,7 +2578,6 @@ body.readonly .day-date, body.readonly #budget-total, body.readonly #trip-title 
   .se-actions .btn-ic, .se-actions .spot-move-sel { min-height: 40px; }
   .pool-hd { padding: 12px; font-size: .88rem; }
   .pool-item { padding: 10px 12px; font-size: .92rem; }
-  #undo-bar { bottom: 90px; }
   .form-row { flex-wrap: wrap; }
   .spot-move-sel { width: 38px; height: 34px; }
 
@@ -2587,13 +2603,19 @@ body.readonly .day-date, body.readonly #budget-total, body.readonly #trip-title 
 
 @media (min-width: 769px) {
   #btn-toggle-map { display: none; }
+  .tabbar { display: none; }
 }
+.more-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 10px; padding-bottom: 16px; }
+.more-grid button, .more-grid a { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; min-height: 84px;
+  background: var(--surface2); border: 1px solid var(--border); border-radius: 12px; color: var(--text); font-size: .85rem; font-family: inherit; text-decoration: none; cursor: pointer; }
+.more-grid span { font-size: 1.5rem; }
+.more-grid button:hover, .more-grid a:hover { border-color: rgba(247,129,102,.4); }
 </style>
 <link rel="stylesheet" href="ui.css">
 <script src="ui.js" defer></script>
 <script>if('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');</script>
 </head>
-<body>
+<body class="has-tabbar">
 
 <nav>
   <a class="nav-logo" href="index.html">TripMaster</a>
@@ -2638,11 +2660,11 @@ body.readonly .day-date, body.readonly #budget-total, body.readonly #trip-title 
     <div class="toolbar">
       <button class="btn-add-day" onclick="addDay()">＋ 新增天數</button>
       <button class="btn-share" onclick="toggleAllDays()">⬍ 展開/收合</button>
-      <button class="btn-share" id="btn-members" style="display:none" onclick="openMembers()">👥 成員</button>
+      <button class="btn-share tb-secondary" id="btn-members" style="display:none" onclick="openMembers()">👥 成員</button>
       <button class="btn-share" id="btn-today" style="display:none" onclick="jumpToToday()">📍 今天</button>
-      <button class="btn-share" onclick="openInfo()">📌 資訊</button>
-      <button class="btn-share" id="btn-checklist" onclick="openChecklist()">✅ 清單</button>
-      <button class="btn-share" onclick="location.href='journal.html?project='+encodeURIComponent(new URLSearchParams(location.search).get('project')||'main')" title="匯出旅遊手札(可存成 PDF)">📔 手札</button>
+      <button class="btn-share tb-secondary" onclick="openInfo()">📌 資訊</button>
+      <button class="btn-share tb-secondary" id="btn-checklist" onclick="openChecklist()">✅ 清單</button>
+      <button class="btn-share tb-secondary" onclick="location.href='journal.html?project='+encodeURIComponent(new URLSearchParams(location.search).get('project')||'main')" title="匯出旅遊手札(可存成 PDF)">📔 手札</button>
     </div>
     <div id="offline-bar" style="display:none"></div>
     <div id="next-bar" style="display:none"></div>
@@ -2678,6 +2700,38 @@ body.readonly .day-date, body.readonly #budget-total, body.readonly #trip-title 
       <button class="ps-btn active" id="ps-map" onclick="switchPanel('map')">🗺 地圖</button>
       <button class="ps-btn" id="ps-poi" onclick="switchPanel('poi')" style="display:none">📖 景點</button>
       <a class="ps-btn" id="ps-open" href="#" target="_blank" style="display:none" title="開新頁">↗</a>
+    </div>
+  </div>
+</div>
+
+<!-- MOBILE TAB BAR(只在手機顯示) -->
+<nav class="tabbar" aria-label="主要功能">
+  <button type="button" class="tb-item active" id="tb-list" onclick="mobileView('list')" aria-current="page">
+    <span class="tb-ic" aria-hidden="true">📋</span><span>行程</span></button>
+  <button type="button" class="tb-item" id="tb-map" onclick="mobileView('map')">
+    <span class="tb-ic" aria-hidden="true">🗺️</span><span>地圖</span></button>
+  <a class="tb-item" id="tb-exp" href="expenses.html">
+    <span class="tb-ic" aria-hidden="true">💴</span><span>費用</span></a>
+  <button type="button" class="tb-item" onclick="openInfo()">
+    <span class="tb-ic" aria-hidden="true">📌</span><span>資訊</span></button>
+  <button type="button" class="tb-item" onclick="openMore()">
+    <span class="tb-ic" aria-hidden="true">⋯</span><span>更多</span></button>
+</nav>
+
+<!-- MORE SHEET -->
+<div class="modal-mask" id="more-modal-mask" onclick="if(event.target===this)closeMore()">
+  <div class="photo-modal" style="width:420px">
+    <div class="pm-head">
+      <span class="pm-title">更多功能</span>
+      <button class="pm-close" onclick="closeMore()">✕</button>
+    </div>
+    <div class="pm-body more-grid">
+      <button type="button" onclick="closeMore();openChecklist()"><span aria-hidden="true">✅</span>行前清單</button>
+      <button type="button" onclick="closeMore();location.href='journal.html?project='+encodeURIComponent(new URLSearchParams(location.search).get('project')||'main')"><span aria-hidden="true">📔</span>旅遊手札</button>
+      <button type="button" id="more-members" style="display:none" onclick="closeMore();openMembers()"><span aria-hidden="true">👥</span>專案成員</button>
+      <button type="button" onclick="closeMore();copyShare()"><span aria-hidden="true">🔗</span>分享連結</button>
+      <button type="button" onclick="closeMore();toggleAllDays()"><span aria-hidden="true">⬍</span>展開/收合全部</button>
+      <a href="index.html"><span aria-hidden="true">🏠</span>回首頁</a>
     </div>
   </div>
 </div>
@@ -2795,6 +2849,51 @@ body.readonly .day-date, body.readonly #budget-total, body.readonly #trip-title 
 </div>
 
 <script>
+// ── 手機底部導覽列:行程 / 地圖切換寫進返回鍵歷史 ──
+(function () {
+  const pid = new URLSearchParams(location.search).get('project') || 'main';
+  document.getElementById('tb-exp').href = 'expenses.html?project=' + encodeURIComponent(pid);
+  const panel = document.getElementById('map-panel');
+  const mapOpen = () => panel.classList.contains('map-open');
+  const mobile = () => matchMedia('(max-width: 768px)').matches;
+
+  function sync() {
+    const m = mapOpen();
+    const list = document.getElementById('tb-list'), map = document.getElementById('tb-map');
+    list.classList.toggle('active', !m); map.classList.toggle('active', m);
+    (m ? list : map).removeAttribute('aria-current');
+    (m ? map : list).setAttribute('aria-current', 'page');
+  }
+  new MutationObserver(sync).observe(panel, { attributes: true, attributeFilter: ['class'] });
+
+  window.mobileView = function (v) {
+    if (v === 'map' && !mapOpen()) {
+      toggleMap();
+      window.tmHistory?.push('map', () => { if (mapOpen()) toggleMap(); });
+    } else if (v === 'list' && mapOpen()) {
+      window.tmHistory?.release('map');
+      toggleMap();
+    }
+  };
+
+  // 手機上按天卡片的「🗺 地圖」:畫好路線後直接切到地圖
+  document.addEventListener('DOMContentLoaded', () => {
+    const orig = window.showDayOnMap;
+    if (typeof orig !== 'function') return;
+    window.showDayOnMap = function (dayId) {
+      orig(dayId);
+      if (mobile() && !mapOpen()) mobileView('map');
+    };
+  });
+
+  window.openMore = function () {
+    const m = document.getElementById('btn-members');
+    document.getElementById('more-members').style.display = m && m.style.display !== 'none' ? '' : 'none';
+    document.getElementById('more-modal-mask').classList.add('open');
+  };
+  window.closeMore = function () { document.getElementById('more-modal-mask').classList.remove('open'); };
+})();
+
 // ── 左右分隔線:拖曳 / 鍵盤 / 預設寬度,存在這台裝置 ──
 (function () {
   const KEY = 'tm-left-width';

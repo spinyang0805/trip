@@ -2,7 +2,7 @@
 <html lang="zh-TW">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>後台管理｜TripMaster</title>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&family=Playfair+Display:wght@700&display=swap" rel="stylesheet">
 
@@ -278,10 +278,23 @@ nav {
 .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%) translateY(50px); background: var(--surface); border: 1px solid var(--border); color: var(--text); padding: 10px 20px; border-radius: 20px; font-size: .82rem; opacity: 0; transition: transform .3s, opacity .3s; z-index: 999; pointer-events: none; }
 .toast.show { transform: translateX(-50%) translateY(0); opacity: 1; }
 
+@media (max-width: 768px) {
+  nav { padding: 0 12px; }
+  #admin-name { display: none; }
+  .admin-header { padding: 18px 16px; }
+  .admin-header h1 { font-size: 1.4rem; }
+  .stats-row { padding: 16px; gap: 10px; }
+  .main-content { padding: 0 16px 40px; }
+  .tabs { overflow-x: auto; flex-wrap: nowrap; scrollbar-width: none; }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tab-btn { flex-shrink: 0; white-space: nowrap; padding: 12px 14px; }
+  .project-row { flex-wrap: wrap; }
+}
 @media (max-width: 600px) {
   .stats-row { grid-template-columns: 1fr 1fr; }
   .user-card { flex-wrap: wrap; }
   .u-actions { width: 100%; }
+  .u-actions > * { flex: 1; justify-content: center; min-height: 44px; }
 }
 </style>
 <link rel="stylesheet" href="ui.css">
