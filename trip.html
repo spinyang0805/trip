@@ -1366,7 +1366,13 @@ function renderRouteInfo(dayId) {
   const totalMin = Math.round(segIdxs.reduce((s, k) => s + (stats[k].durVal || 0), 0) / 60);
   const totalTxt = totalMin >= 60 ? `${Math.floor(totalMin/60)} 小時 ${totalMin%60} 分` : `${totalMin} 分`;
   const dayNum = Object.keys(tripData.days).sort().indexOf(dayId) + 1;
-  el.innerHTML = `<div class="ri-total">Day ${dayNum}｜🚗 總車程約 ${totalTxt}</div>` +
+  const min = routeInfoMin();
+  el.classList.toggle('min', min);
+  el.innerHTML = `<div class="ri-total"${min ? ' onclick="toggleRouteInfo()"' : ''}>
+      <span class="ri-total-txt">${min ? '' : `Day ${dayNum}｜`}🚗 ${min ? '' : '總車程約 '}${totalTxt}</span>
+      <button class="ri-toggle" onclick="event.stopPropagation();toggleRouteInfo()"
+        aria-label="${min ? '展開車程明細' : '縮小車程明細'}" title="${min ? '展開' : '縮小'}">${min ? '⤢' : '－'}</button>
+    </div>` +
     segIdxs.map(k => {
       const x = stats[k];
       const info = x.skipped ? `✈️ 不畫路線(${x.distText})`
@@ -1380,6 +1386,20 @@ function renderRouteInfo(dayId) {
     }).join('');
   el.style.display = 'block';
 }
+
+// 車程面板縮小/展開(個人偏好存 localStorage,換天或重畫都保持)
+let routeInfoMinState = null;
+function routeInfoMin() {
+  if (routeInfoMinState === null) {
+    try { routeInfoMinState = localStorage.getItem('tm-route-info-min') === '1'; } catch { routeInfoMinState = false; }
+  }
+  return routeInfoMinState;
+}
+window.toggleRouteInfo = function() {
+  routeInfoMinState = !routeInfoMin();
+  try { localStorage.setItem('tm-route-info-min', routeInfoMinState ? '1' : '0'); } catch {}
+  if (activeDay) renderRouteInfo(activeDay);
+};
 
 // 點面板上的某一段:放大到那段並加粗閃一下
 window.focusSegment = function(dayId, segIdx) {
@@ -2280,7 +2300,13 @@ body.no-select { user-select:none; -webkit-user-select:none; }
 
 /* ── ROUTE INFO ── */
 #route-info { position:absolute; bottom:16px; left:12px; z-index:10; background:rgba(13,17,23,.92); border:1px solid var(--border); border-radius:10px; padding:8px 10px; font-size:.72rem; color:var(--text); width:340px; max-width:calc(100% - 24px); max-height:40%; overflow-y:auto; display:none; }
-#route-info .ri-total { font-weight:700; color:var(--gold); margin-bottom:6px; }
+#route-info .ri-total { font-weight:700; color:var(--gold); margin-bottom:6px; display:flex; align-items:center; gap:8px; }
+#route-info .ri-total-txt { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+#route-info .ri-toggle { flex-shrink:0; background:var(--surface2); border:1px solid var(--border); border-radius:6px; color:var(--text); width:28px; height:28px; font-size:.85rem; line-height:1; cursor:pointer; font-family:inherit; display:inline-flex; align-items:center; justify-content:center; }
+#route-info .ri-toggle:hover { background:var(--border); }
+#route-info.min { width:auto; padding:4px 4px 4px 10px; border-radius:18px; overflow:hidden; }
+#route-info.min .ri-total { margin:0; cursor:pointer; }
+#route-info.min .ri-seg { display:none; }
 #route-info .ri-seg { display:grid; grid-template-columns:14px 1fr; gap:0 8px; align-items:center; padding:5px 4px; border-radius:6px; cursor:pointer; }
 #route-info .ri-seg:hover { background:rgba(255,255,255,.06); }
 #route-info .ri-sw { width:14px; height:5px; border-radius:3px; grid-row:span 2; }
@@ -2537,6 +2563,7 @@ body.readonly .day-date, body.readonly #budget-total, body.readonly #trip-title 
   .map-day-tabs { max-width: calc(100% - 24px); }
   .map-tab { padding: 7px 14px; font-size: .8rem; }
   #route-info { bottom: 76px; max-width: calc(100% - 24px); }
+  #route-info .ri-toggle { width: 36px; height: 36px; font-size: 1rem; }
   #map-nav-btn { left: 12px; right: 12px; justify-content: center; padding: 12px; }
 
   /* 彈窗 */
@@ -2602,6 +2629,7 @@ body.readonly .day-date, body.readonly #budget-total, body.readonly #trip-title 
       <button class="btn-share" id="btn-today" style="display:none" onclick="jumpToToday()">📍 今天</button>
       <button class="btn-share" onclick="openInfo()">📌 資訊</button>
       <button class="btn-share" id="btn-checklist" onclick="openChecklist()">✅ 清單</button>
+      <button class="btn-share" onclick="location.href='journal.html?project='+encodeURIComponent(new URLSearchParams(location.search).get('project')||'main')" title="匯出旅遊手札(可存成 PDF)">📔 手札</button>
     </div>
     <div id="offline-bar" style="display:none"></div>
     <div id="next-bar" style="display:none"></div>

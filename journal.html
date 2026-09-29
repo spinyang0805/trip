@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>旅遊手札｜TripMaster</title>
+<script>
+window.initMap = function() {
+  window.__mapsReady = true;
+  if (window.__onMapsReady) window.__onMapsReady();
+};
+</script>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=Noto+Serif+TC:wght@500;700;900&family=Caveat:wght@600;700&display=swap" rel="stylesheet">
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/12.12.1/firebase-app.js";
+import { getAuth, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/12.12.1/firebase-auth.js";
+import { getDatabase, ref, get } from "https://www.gstatic.com/firebasejs/12.12.1/firebase-database.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyCT9AFuUGMuikwcA2wFYAbEs1gxke5i4dA",
+  authDomain: "fukuoka-kyushu-oct2026.firebaseapp.com",
+  databaseURL: "https://fukuoka-kyushu-oct2026-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "fukuoka-kyushu-oct2026",
+  storageBucket: "fukuoka-kyushu-oct2026.firebasestorage.app",
+  messagingSenderId: "101376635642",
+  appId: "1:101376635642:web:d28651919e1df014bb4f43"
+};
+const app  = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db   = getDatabase(app);
+
+const MAPS_KEY = 'AIzaSyC-QgKIKtZkmWIOXawmGBHVci4kKJOF7W0';
+const urlParams = new URLSearchParams(location.search);
+const projectId = urlParams.get('project') || 'main';
+
+const SPOT_TYPES = {
+  attraction: { icon:'🗺️', label:'景點' }, meal: { icon:'🍜', label:'餐廳' }, snack: { icon:'🍡', label:'小吃' },
+  transport: { icon:'🚗', label:'交通' }, hotel: { icon:'🏨', label:'住宿' }, ticket: { icon:'🎟️', label:'門票' },
+  parking: { icon:'🅿️', label:'停車' }, toll: { icon:'🛣️', label:'過路費' }, shopping: { icon:'🛍️', label:'購物' },
+  scenery: { icon:'🌸', label:'風景' }, activity: { icon:'🎡', label:'活動' }, gas: { icon:'⛽', label:'加油' },
+};
+const CATEGORY_ICONS = { 餐廳:'🍜', 小吃:'🍡', 交通:'🚗', 住宿:'🏨', 門票:'🎟️', 購物:'🛍️', 停車:'🅿️', 加油:'⛽', 景點:'🗺️', 醫藥:'💊', 其他:'💰' };
+const DAY_COLORS = ['#4a7c59','#c4783a','#2e6da4','#8e44ad','#c0392b','#16a085','#b8892f','#1a6b8a'];
+const CURRENCY_SYMBOLS = { JPY:'¥', TWD:'NT$', USD:'$', EUR:'€', KRW:'₩', CNY:'¥', HKD:'HK$', THB:'฿', VND:'₫', GBP:'£', AUD:'A$', SGD:'S$' };
+const DOW_TW = ['日','一','二','三','四','五','六'];
+
+let project = {}, trip = {}, photos = {}, expenses = [], members = [];
+let baseCurrency = 'JPY', currencyRates = {};
+const routes = {};   // dayId -> { legs: [{sec, m, skipped}], polylines: [enc], ok }
+
+// ── utils ──
+const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+const sym = c => CURRENCY_SYMBOLS[c] || (c + ' ');
+function toBase(amount, cur) {
+  if (!cur || cur === baseCurrency) return amount;
+  const rf = currencyRates[cur]?.rateToTWD, rt = currencyRates[baseCurrency]?.rateToTWD;
+  return rf && rt ? amount * rf / rt : amount;
+}
+const money = n => sym(baseCurrency) + Math.round(n).toLocaleString();
+function hmToMin(t) { if (!t) return null; const [h, m] = t.split(':').map(Number); return isNaN(h) ? null : h * 60 + (m || 0); }
+function minToHm(m) { m = ((Math.round(m) % 1440) + 1440) % 1440; return String(Math.floor(m/60)).padStart(2,'0') + ':' + String(m%60).padStart(2,'0'); }
+function fmtDur(min) { min = Math.round(min); return min < 60 ? `${min} 分` : (min % 60 ? `${Math.floor(min/60)} 小時 ${min%60} 分` : `${min/60} 小時`); }
+function fmtKm(m) { return m >= 10000 ? `${Math.round(m/1000)} 公里` : `${(m/1000).toFixed(1)} 公里`; }
+function fmtDate(d, withYear) {
+  if (!d) return '';
+  const x = new Date(d + 'T00:00:00');
+  return `${withYear ? x.getFullYear() + '.' : ''}${x.getMonth()+1}.${String(x.getDate()).padStart(2,'0')}`;
+}
+const dow = d => d ? '週' + DOW_TW[new Date(d + 'T00:00:00').getDay()] : '';
+function spotsOf(day) { return day?.spots ? Object.keys(day.spots).sort().map(k => ({ id:k, ...day.spots[k] })) : []; }
+function haversineKm(a, b) {
+  const R = 6371, r = x => x * Math.PI / 180;
+  const dLat = r(b.lat - a.lat), dLng = r(b.lng - a.lng);
+  const h = Math.sin(dLat/2)**2 + Math.cos(r(a.lat)) * Math.cos(r(b.lat)) * Math.sin(dLng/2)**2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+function setStatus(t) { document.getElementById('status').textContent = t; }
+
+// ── auth & load ──
+onAuthStateChanged(auth, async user => {
+  if (!user) { location.href = 'index.html'; return; }
+  const ud = (await get(ref(db, `users/${user.uid}`))).val();
+  if (!ud || (ud.status !== 'approved' && !ud.isAdmin)) { location.href = 'index.html'; return; }
+  project = (await get(ref(db, `projects/${projectId}`))).val() || {};
+  const isMember = ud.isAdmin || project.ownerId === user.uid || project.members?.[user.uid]?.status === 'approved';
+  if (!isMember) { location.href = 'index.html'; return; }
+  document.getElementById('back-link').href = `trip.html?project=${encodeURIComponent(projectId)}`;
+  setStatus('讀取行程資料…');
+  const [t, p, e] = await Promise.all([
+    get(ref(db, `trips/${projectId}`)), get(ref(db, `photos/${projectId}`)), get(ref(db, `expenses/${projectId}`)),
+  ]);
+  trip = t.val() || { days: {} };
+  photos = p.val() || {};
+  expenses = Object.entries(e.val() || {}).map(([id, x]) => ({ id, ...x }));
+  members = Object.entries(project.members || {}).map(([id, m]) => ({ id, name: m.name || id }));
+  baseCurrency = project.baseCurrency || 'JPY';
+  currencyRates = project.currencyRates || {};
+  document.title = `${trip.title || project.title || '旅遊'}｜旅遊手札`;
+  render();
+  setStatus('計算路線與地圖…');
+  // 地圖服務載不到時也要能印(只是沒有路線圖與車程)
+  setTimeout(() => {
+    const b = document.getElementById('btn-print');
+    if (b.disabled) { b.disabled = false; setStatus('地圖載入較慢,可先列印(路線可能不完整)'); }
+  }, 20000);
+  whenMaps(async () => { await computeRoutes(); render(); await waitImages(); setStatus('完成,可以列印或存成 PDF'); document.getElementById('btn-print').disabled = false; });
+});
+
+function whenMaps(fn) { if (window.__mapsReady) fn(); else window.__onMapsReady = fn; }
+
+// ── 路線:同一天連續、相距 ≤300km 的景點分成一組,每組一次 Directions(含中途點) ──
+async function computeRoutes() {
+  const svc = new google.maps.DirectionsService();
+  for (const dayId of Object.keys(trip.days || {}).sort()) {
+    const pts = spotsOf(trip.days[dayId]).filter(s => s.lat && s.lng);
+    const r = routes[dayId] = { legs: [], polylines: [], pts };
+    if (pts.length < 2) continue;
+    const avoid = pts.some(s => s.avoidToll);
+    const groups = [[pts[0]]];
+    for (let i = 1; i < pts.length; i++) {
+      if (haversineKm(pts[i-1], pts[i]) > 300) { r.legs[i-1] = { skipped: true, m: haversineKm(pts[i-1], pts[i]) * 1000 }; groups.push([pts[i]]); }
+      else groups[groups.length - 1].push(pts[i]);
+    }
+    let offset = 0;
+    for (const g of groups) {
+      if (g.length >= 2 && g.length <= 27) {
+        try {
+          const res = await svc.route({
+            origin: { lat: g[0].lat, lng: g[0].lng },
+            destination: { lat: g[g.length-1].lat, lng: g[g.length-1].lng },
+            waypoints: g.slice(1, -1).map(s => ({ location: { lat: s.lat, lng: s.lng }, stopover: true })),
+            travelMode: google.maps.TravelMode.DRIVING, avoidTolls: avoid,
+          });
+          const route = res.routes[0];
+          route.legs.forEach((l, j) => r.legs[offset + j] = { sec: l.duration.value, m: l.distance.value });
+          r.polylines.push(route.overview_polyline);
+        } catch { r.polylines.push(null); }
+      }
+      offset += g.length;
+    }
+  }
+}
+
+function staticMapUrl(dayId, color) {
+  const r = routes[dayId];
+  const pts = r?.pts || spotsOf(trip.days[dayId]).filter(s => s.lat && s.lng);
+  if (!pts.length) return '';
+  const c = '0x' + color.replace('#', '');
+  const style = [
+    'feature:all|element:labels.text.fill|color:0x6b5d4f',
+    'feature:landscape|color:0xf1e9d6', 'feature:water|color:0xbfd3d6',
+    'feature:road|element:geometry|color:0xffffff', 'feature:road.highway|element:geometry|color:0xf3d9a8',
+    'feature:poi|visibility:off', 'feature:transit|visibility:off',
+  ].map(s => '&style=' + encodeURIComponent(s)).join('');
+  let paths = '';
+  const polys = (r?.polylines || []).filter(Boolean);
+  if (polys.length) paths = polys.map(p => `&path=${encodeURIComponent(`color:${c}dd|weight:5|enc:${p}`)}`).join('');
+  else if (pts.length > 1) paths = `&path=${encodeURIComponent(`color:${c}aa|weight:3|` + pts.map(p => `${p.lat},${p.lng}`).join('|'))}`;
+  const label = i => i < 9 ? String(i + 1) : String.fromCharCode(65 + i - 9);
+  const markers = pts.map((p, i) => `&markers=${encodeURIComponent(`size:mid|color:${c}|label:${label(i)}|${p.lat},${p.lng}`)}`).join('');
+  let url = `https://maps.googleapis.com/maps/api/staticmap?size=640x300&scale=2&language=zh-TW&key=${MAPS_KEY}${style}${markers}${paths}`;
+  if (url.length > 16000) url = url.replace(/&path=[^&]*/g, '') + `&path=${encodeURIComponent(`color:${c}aa|weight:3|` + pts.map(p => `${p.lat},${p.lng}`).join('|'))}`;
+  return url;
+}
+
+function waitImages() {
+  const imgs = [...document.querySelectorAll('#book img')];
+  return Promise.race([
+    Promise.all(imgs.map(i => i.complete ? 0 : new Promise(r => { i.onload = i.onerror = r; }))),
+    new Promise(r => setTimeout(r, 20000)),
+  ]);
+}
+
+// ── render ──
+function render() {
+  const opt = {
+    planning: document.getElementById('opt-planning').checked,
+    memory: document.getElementById('opt-memory').checked,
+    expense: document.getElementById('opt-expense').checked,
+    memo: document.getElementById('opt-memo').checked,
+  };
+  const dayKeys = Object.keys(trip.days || {}).sort();
+  const html = [renderCover(dayKeys), renderOverview(dayKeys)];
+  dayKeys.forEach((k, i) => html.push(renderDay(k, i, opt)));
+  if (opt.expense && expenses.length) html.push(renderExpenses());
+  document.getElementById('book').innerHTML = html.join('');
+}
+window.rerender = render;
+
+function tripRange(dayKeys) {
+  const dates = dayKeys.map(k => trip.days[k].date).filter(Boolean).sort();
+  const start = dates[0] || project.startDate, end = dates[dates.length - 1] || project.endDate;
+  if (!start) return '';
+  return start === end || !end ? fmtDate(start, true) : `${fmtDate(start, true)} — ${fmtDate(end, start.slice(0,4) !== end.slice(0,4))}`;
+}
+
+function renderCover(dayKeys) {
+  const title = trip.title || project.title || '我們的旅行';
+  const nSpots = dayKeys.reduce((s, k) => s + spotsOf(trip.days[k]).length, 0);
+  const cover = Object.values(photos).flatMap(d => Object.values(d || {})).find(p => p.kind === 'memory')
+    || Object.values(photos).flatMap(d => Object.values(d || {}))[0];
+  return `<section class="page cover">
+    <div class="cover-top">TRAVEL JOURNAL</div>
+    <div class="cover-emoji">${esc(project.emoji || '✈️')}</div>
+    <h1 class="cover-title">${esc(title)}</h1>
+    <div class="cover-date">${tripRange(dayKeys)}</div>
+    ${cover ? `<figure class="polaroid cover-photo"><img src="${esc(cover.url)}" alt=""><figcaption>${esc(cover.caption || '')}</figcaption></figure>` : ''}
+    <div class="cover-stats">
+      <div><b>${dayKeys.length}</b><span>天</span></div>
+      <div><b>${nSpots}</b><span>個地點</span></div>
+      ${members.length ? `<div><b>${members.length}</b><span>位旅伴</span></div>` : ''}
+    </div>
+    ${members.length ? `<div class="cover-members">${members.map(m => esc(m.name)).join('　·　')}</div>` : ''}
+    ${project.description ? `<p class="cover-desc">${esc(project.description)}</p>` : ''}
+  </section>`;
+}
+
+function renderOverview(dayKeys) {
+  const rows = dayKeys.map((k, i) => {
+    const day = trip.days[k], sp = spotsOf(day), color = DAY_COLORS[i % DAY_COLORS.length];
+    const route = sp.length ? sp.map(s => esc(s.name || '')).filter(Boolean).join(' → ') : '—';
+    return `<tr><td><span class="ov-day" style="background:${color}">Day ${i+1}</span></td>
+      <td class="ov-date">${fmtDate(day.date)}<small>${dow(day.date)}</small></td>
+      <td class="ov-route">${route}</td></tr>`;
+  }).join('');
+  return `<section class="page overview">
+    <h2 class="sec-title"><span>行程總覽</span><em>Itinerary</em></h2>
+    <table class="ov-table">${rows}</table>
+  </section>`;
+}
+
+function renderDay(dayId, idx, opt) {
+  const day = trip.days[dayId], spots = spotsOf(day), color = DAY_COLORS[idx % DAY_COLORS.length];
+  const r = routes[dayId];
+  const geoIdx = {};  // spot.id -> index among geo spots (for legs)
+  (r?.pts || spots.filter(s => s.lat && s.lng)).forEach((s, i) => geoIdx[s.id] = i);
+  const totalSec = (r?.legs || []).reduce((s, l) => s + (l?.sec || 0), 0);
+  const totalCost = spots.reduce((s, sp) => s + toBase(parseFloat(sp.cost) || 0, sp.costCurrency || baseCurrency), 0);
+
+  // 推算到達時間(同 trip.html:時間 + 停留 + 車程)
+  let depart = null, prevGeo = null;
+  const items = spots.map((sp, i) => {
+    let eta = null;
+    if (prevGeo != null && depart != null && geoIdx[sp.id] === prevGeo + 1) {
+      const leg = r?.legs?.[prevGeo];
+      if (leg?.sec) eta = depart + leg.sec / 60;
+    }
+    const t = hmToMin(sp.time);
+    const arrive = t ?? eta;
+    depart = arrive != null ? arrive + (parseInt(sp.stay) || 0) : null;
+    if (geoIdx[sp.id] != null) prevGeo = geoIdx[sp.id];
+    const type = SPOT_TYPES[sp.type] || SPOT_TYPES.attraction;
+    const leg = geoIdx[sp.id] != null ? r?.legs?.[geoIdx[sp.id]] : null;
+    const isLast = i === spots.length - 1;
+    const legHtml = !isLast && leg
+      ? `<div class="tl-leg">${leg.skipped ? `✈️ 移動 約 ${fmtKm(leg.m)}` : `🚗 ${fmtDur(leg.sec/60)}・${fmtKm(leg.m)}`}</div>` : '';
+    const cost = parseFloat(sp.cost) || 0;
+    return `<li class="tl-item">
+      <div class="tl-time">${t != null ? minToHm(t) : eta != null ? `<i>約 ${minToHm(eta)}</i>` : ''}</div>
+      <div class="tl-dot" style="border-color:${color};color:${color}">${i+1}</div>
+      <div class="tl-body">
+        <div class="tl-name">${esc(sp.name || '(未命名)')}<span class="tl-type">${type.icon} ${type.label}</span></div>
+        <div class="tl-meta">
+          ${sp.stay ? `<span>停留 ${fmtDur(parseInt(sp.stay))}</span>` : ''}
+          ${cost ? `<span>${sym(sp.costCurrency || baseCurrency)}${cost.toLocaleString()}</span>` : ''}
+        </div>
+        ${sp.note ? `<div class="tl-note">${esc(sp.note)}</div>` : ''}
+        ${legHtml}
+      </div>
+    </li>`;
+  }).join('');
+
+  const dayPhotos = Object.values(photos[dayId] || {}).sort((a, b) => (a.uploadedAt || 0) - (b.uploadedAt || 0));
+  const photoBlock = (kind, title) => {
+    const list = dayPhotos.filter(p => (p.kind || 'planning') === kind);
+    if (!list.length) return '';
+    return `<div class="ph-block"><h4>${title}</h4><div class="ph-grid">${list.map((p, i) =>
+      `<figure class="polaroid" style="--tilt:${[-2, 1.5, -1, 2, -1.5, 1][i % 6]}deg"><img src="${esc(p.url)}" alt="" loading="eager"><figcaption>${esc(p.caption || '')}</figcaption></figure>`).join('')}</div></div>`;
+  };
+  const mapUrl = staticMapUrl(dayId, color);
+  const first = spots[0]?.name, last = spots[spots.length - 1]?.name;
+
+  return `<section class="page day" style="--day:${color}">
+    <header class="day-head">
+      <div class="day-stamp"><small>DAY</small>${idx + 1}</div>
+      <div class="day-title">
+        <div class="day-date">${fmtDate(day.date, true)} <span>${dow(day.date)}</span></div>
+        <div class="day-route">${first ? esc(first) + (last && last !== first ? ' → ' + esc(last) : '') : '自由活動'}</div>
+      </div>
+      <div class="day-stats">
+        <div><b>${spots.length}</b>地點</div>
+        ${totalSec ? `<div><b>${fmtDur(totalSec/60)}</b>車程</div>` : ''}
+        ${totalCost ? `<div><b>${money(totalCost)}</b>預估</div>` : ''}
+      </div>
+    </header>
+    ${mapUrl ? `<div class="day-map"><img src="${mapUrl}" alt="Day ${idx+1} 路線圖" onerror="this.parentElement.classList.add('map-fail')"><p class="map-fail-msg">地圖圖片無法載入(請在 Google Cloud Console 啟用 Maps Static API)</p></div>` : ''}
+    ${spots.length ? `<ol class="timeline">${items}</ol>` : '<p class="empty">這天還沒有安排景點</p>'}
+    ${opt.memory ? photoBlock('memory', '📸 旅途回憶') : ''}
+    ${opt.planning ? photoBlock('planning', '📋 行前規劃') : ''}
+    ${opt.memo ? '<div class="memo"><h4>✎ 今日隨筆</h4><div class="lines"></div></div>' : ''}
+  </section>`;
+}
+
+function renderExpenses() {
+  const total = expenses.reduce((s, e) => s + toBase(parseFloat(e.amount) || 0, e.currency || baseCurrency), 0);
+  const byCat = {};
+  expenses.forEach(e => { const c = e.category || '其他'; byCat[c] = (byCat[c] || 0) + toBase(parseFloat(e.amount) || 0, e.currency || baseCurrency); });
+  const cats = Object.entries(byCat).sort((a, b) => b[1] - a[1]);
+  const max = cats[0]?.[1] || 1;
+
+  // 結算(同 expenses.html)
+  const bal = {}; members.forEach(m => bal[m.id] = 0);
+  expenses.forEach(e => {
+    const cur = e.currency || baseCurrency, amt = toBase(parseFloat(e.amount) || 0, cur), payer = e.paidBy, sp = e.splitWith || [];
+    if (!sp.length) return;
+    if (e.splitMethod === 'custom' && e.customAmounts) {
+      sp.forEach(u => { if (u !== payer) { const s = toBase(parseFloat(e.customAmounts[u]) || 0, cur); bal[u] = (bal[u]||0) - s; bal[payer] = (bal[payer]||0) + s; } });
+    } else if (e.splitMethod !== 'payer_only') {
+      const s = amt / sp.length;
+      sp.forEach(u => { if (u !== payer) { bal[u] = (bal[u]||0) - s; bal[payer] = (bal[payer]||0) + s; } });
+    }
+  });
+  const d = members.filter(m => bal[m.id] < -0.5).map(m => ({ ...m, a: bal[m.id] }));
+  const c = members.filter(m => bal[m.id] > 0.5).map(m => ({ ...m, a: bal[m.id] }));
+  const tx = []; let i = 0, j = 0;
+  while (i < d.length && j < c.length) {
+    const pay = Math.min(-d[i].a, c[j].a);
+    tx.push(`<li><b>${esc(d[i].name)}</b> → <b>${esc(c[j].name)}</b><span>${money(pay)}</span></li>`);
+    d[i].a += pay; c[j].a -= pay;
+    if (Math.abs(d[i].a) < 0.5) i++;
+    if (Math.abs(c[j].a) < 0.5) j++;
+  }
+  const perHead = members.length ? total / members.length : 0;
+
+  return `<section class="page expense">
+    <h2 class="sec-title"><span>旅費帳本</span><em>Expenses</em></h2>
+    <div class="exp-total">
+      <div><small>總花費</small><b>${money(total)}</b></div>
+      <div><small>筆數</small><b>${expenses.length}</b></div>
+      ${members.length ? `<div><small>平均每人</small><b>${money(perHead)}</b></div>` : ''}
+    </div>
+    <h4>分類統計</h4>
+    <div class="cat-list">${cats.map(([k, v]) => `<div class="cat-row"><span>${CATEGORY_ICONS[k] || '💰'} ${esc(k)}</span>
+      <div class="cat-bar"><i style="width:${Math.max(2, v / max * 100)}%"></i></div><b>${money(v)}</b></div>`).join('')}</div>
+    ${members.length ? `<h4>結算</h4>${tx.length ? `<ul class="tx-list">${tx.join('')}</ul>` : '<p class="settled">✓ 全部結清</p>'}` : ''}
+    <p class="exp-foot">以 ${baseCurrency} 計算;外幣依費用頁設定的匯率換算。</p>
+  </section>`;
+}
+
+window.printBook = () => window.print();
+</script>
+
+<style>
+:root {
+  --paper: #faf6ec;
+  --paper-2: #f2ebdb;
+  --ink: #2d2823;
+  --ink-2: #5e554c;
+  --muted: #8a7f73;
+  --rule: #e2d8c3;
+  --accent: #c4623f;
+  --gold: #b8892f;
+  --desk: #d9d3c7;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+body { background: var(--desk); color: var(--ink); font-family: 'Noto Sans TC', sans-serif; font-size: 14px; line-height: 1.6; }
+
+/* ── 工具列(列印時隱藏) ── */
+.toolbar { position: sticky; top: 0; z-index: 10; background: #2d2823; color: #f4efe4; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding: 10px 16px; font-size: 14px; }
+.toolbar a { color: #f4efe4; text-decoration: none; padding: 8px 6px; border-radius: 8px; }
+.toolbar a:hover { background: rgba(255,255,255,.1); }
+.toolbar label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; min-height: 36px; }
+.toolbar input { width: 18px; height: 18px; accent-color: var(--accent); }
+.toolbar .spacer { flex: 1; }
+#status { color: #cfc4b3; font-size: 13px; }
+#btn-print { background: var(--accent); color: #fff; border: none; border-radius: 10px; padding: 10px 18px; font: 700 14px 'Noto Sans TC', sans-serif; cursor: pointer; }
+#btn-print:disabled { opacity: .5; cursor: progress; }
+:focus-visible { outline: 2px solid #58a6ff; outline-offset: 2px; }
+
+/* ── 頁面(螢幕上當 A4 紙預覽) ── */
+#book { padding: 24px 12px 60px; display: flex; flex-direction: column; align-items: center; gap: 24px; }
+.page { width: 210mm; min-height: 297mm; max-width: 100%; background: var(--paper); padding: 18mm 16mm; box-shadow: 0 6px 24px rgba(0,0,0,.18); position: relative; }
+.page::before { content: ''; position: absolute; inset: 8mm; border: 1px solid var(--rule); border-radius: 2px; pointer-events: none; }
+
+.sec-title { display: flex; align-items: baseline; gap: 12px; font-family: 'Noto Serif TC', serif; font-size: 26px; font-weight: 900; margin-bottom: 18px; padding-bottom: 8px; border-bottom: 2px solid var(--ink); }
+.sec-title em { font-family: 'Caveat', cursive; font-style: normal; font-weight: 700; font-size: 26px; color: var(--accent); }
+h4 { font-family: 'Noto Serif TC', serif; font-size: 15px; margin: 18px 0 10px; color: var(--ink-2); }
+
+/* 封面 */
+.cover { display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 12px;
+  background: radial-gradient(circle at 20% 15%, rgba(196,98,63,.08), transparent 45%), radial-gradient(circle at 85% 90%, rgba(184,137,47,.10), transparent 45%), var(--paper); }
+.cover-top { font-family: 'Caveat', cursive; font-size: 22px; letter-spacing: .3em; color: var(--accent); }
+.cover-emoji { font-size: 56px; }
+.cover-title { font-family: 'Noto Serif TC', serif; font-weight: 900; font-size: 40px; line-height: 1.3; max-width: 150mm; }
+.cover-date { font-family: 'Caveat', cursive; font-size: 30px; color: var(--ink-2); }
+.cover-photo { width: 110mm; margin: 14px 0; --tilt: -2deg; }
+.cover-photo img { height: 80mm; }
+.cover-stats { display: flex; gap: 28px; margin-top: 8px; }
+.cover-stats div { display: flex; flex-direction: column; align-items: center; }
+.cover-stats b { font-family: 'Noto Serif TC', serif; font-size: 30px; color: var(--accent); line-height: 1.1; }
+.cover-stats span { font-size: 13px; color: var(--muted); }
+.cover-members { color: var(--ink-2); font-size: 15px; }
+.cover-desc { max-width: 130mm; color: var(--ink-2); font-size: 14px; }
+
+/* 總覽 */
+.ov-table { width: 100%; border-collapse: collapse; }
+.ov-table td { padding: 12px 8px; border-bottom: 1px dashed var(--rule); vertical-align: top; }
+.ov-day { display: inline-block; color: #fff; font-weight: 700; font-size: 13px; padding: 3px 10px; border-radius: 4px; white-space: nowrap; }
+.ov-date { font-family: 'Caveat', cursive; font-size: 22px; white-space: nowrap; line-height: 1.2; }
+.ov-date small { display: block; font-family: 'Noto Sans TC', sans-serif; font-size: 12px; color: var(--muted); }
+.ov-route { font-size: 14px; color: var(--ink-2); }
+
+/* 每日頁 */
+.day-head { display: flex; align-items: center; gap: 16px; padding-bottom: 12px; border-bottom: 2px solid var(--day); margin-bottom: 14px; }
+.day-stamp { width: 64px; height: 64px; border: 3px double var(--day); color: var(--day); border-radius: 50%; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  font-family: 'Noto Serif TC', serif; font-weight: 900; font-size: 26px; line-height: 1; transform: rotate(-8deg); flex-shrink: 0; }
+.day-stamp small { font-family: 'Caveat', cursive; font-size: 14px; letter-spacing: .1em; }
+.day-title { flex: 1; min-width: 0; }
+.day-date { font-family: 'Caveat', cursive; font-size: 28px; line-height: 1.1; }
+.day-date span { font-family: 'Noto Sans TC', sans-serif; font-size: 13px; color: var(--muted); }
+.day-route { font-family: 'Noto Serif TC', serif; font-size: 18px; font-weight: 700; }
+.day-stats { display: flex; gap: 14px; text-align: center; font-size: 12px; color: var(--muted); }
+.day-stats b { display: block; font-size: 15px; color: var(--ink); }
+
+.day-map { margin-bottom: 16px; border: 6px solid #fff; box-shadow: 0 2px 8px rgba(0,0,0,.12); position: relative; break-inside: avoid; }
+.day-map img { display: block; width: 100%; height: auto; aspect-ratio: 640/300; object-fit: cover; background: var(--paper-2); }
+.day-map::after { content: ''; position: absolute; top: -12px; left: 50%; width: 80px; height: 22px; transform: translateX(-50%) rotate(-2deg); background: rgba(212,190,140,.55); }
+.map-fail-msg { display: none; padding: 20px; font-size: 13px; color: var(--muted); text-align: center; }
+.day-map.map-fail img { display: none; }
+.day-map.map-fail .map-fail-msg { display: block; }
+
+.timeline { list-style: none; }
+.tl-item { display: grid; grid-template-columns: 58px 30px 1fr; gap: 0 10px; break-inside: avoid; }
+.tl-time { font-family: 'Caveat', cursive; font-size: 22px; line-height: 30px; text-align: right; color: var(--ink); }
+.tl-time i { font-size: 17px; color: var(--muted); font-style: normal; }
+.tl-dot { width: 30px; height: 30px; border: 2px solid; border-radius: 50%; background: var(--paper); display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 13px; position: relative; z-index: 1; }
+.tl-item { position: relative; }
+.tl-item:not(:last-child)::before { content: ''; position: absolute; top: 30px; bottom: 0; left: calc(58px + 10px + 14px); border-left: 2px dotted var(--rule); }
+.tl-body { padding: 3px 0 14px; }
+.tl-name { font-size: 16px; font-weight: 700; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.tl-type { font-size: 12px; font-weight: 400; color: var(--muted); }
+.tl-meta { display: flex; gap: 12px; font-size: 13px; color: var(--ink-2); }
+.tl-meta:empty { display: none; }
+.tl-note { font-size: 13px; color: var(--ink-2); background: var(--paper-2); border-left: 3px solid var(--gold); padding: 4px 10px; margin-top: 4px; white-space: pre-wrap; }
+.tl-leg { font-size: 12px; color: var(--muted); margin-top: 8px; }
+.empty { color: var(--muted); padding: 20px 0; }
+
+/* 照片:拍立得 + 膠帶 */
+.ph-block { break-inside: avoid-page; }
+.ph-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px 14px; padding-top: 6px; }
+.polaroid { background: #fff; padding: 6px 6px 4px; box-shadow: 0 2px 6px rgba(0,0,0,.15); transform: rotate(var(--tilt, 0deg)); position: relative; break-inside: avoid; }
+.polaroid::before { content: ''; position: absolute; top: -9px; left: 50%; width: 46px; height: 16px; transform: translateX(-50%) rotate(-3deg); background: rgba(212,190,140,.6); }
+.polaroid img { display: block; width: 100%; height: 42mm; object-fit: cover; background: var(--paper-2); }
+.polaroid figcaption { font-family: 'Caveat', 'Noto Sans TC', cursive; font-size: 14px; text-align: center; min-height: 18px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.memo { break-inside: avoid; }
+.memo .lines { height: 36mm; background: repeating-linear-gradient(transparent 0 8.5mm, var(--rule) 8.5mm 9mm); }
+
+/* 帳本 */
+.exp-total { display: flex; gap: 12px; }
+.exp-total div { flex: 1; background: var(--paper-2); border-radius: 6px; padding: 12px 14px; }
+.exp-total small { display: block; font-size: 12px; color: var(--muted); }
+.exp-total b { font-family: 'Noto Serif TC', serif; font-size: 22px; }
+.cat-row { display: grid; grid-template-columns: 90px 1fr 110px; align-items: center; gap: 10px; padding: 5px 0; font-size: 14px; }
+.cat-row b { text-align: right; font-variant-numeric: tabular-nums; }
+.cat-bar { height: 10px; background: var(--paper-2); border-radius: 5px; overflow: hidden; }
+.cat-bar i { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), var(--gold)); }
+.tx-list { list-style: none; }
+.tx-list li { display: flex; gap: 8px; align-items: baseline; padding: 8px 0; border-bottom: 1px dashed var(--rule); }
+.tx-list span { margin-left: auto; font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums; }
+.settled { color: #4a7c59; font-weight: 700; }
+.exp-foot { margin-top: 18px; font-size: 12px; color: var(--muted); }
+
+@media (max-width: 800px) {
+  #book { padding: 12px 0 40px; gap: 12px; }
+  .page { width: 100%; min-height: 0; padding: 22px 18px; }
+  .page::before { inset: 6px; }
+  .cover { min-height: 90vh; }
+  .cover-title { font-size: 30px; }
+  .cover-photo { width: 80%; }
+  .day-head { flex-wrap: wrap; }
+  .day-stats { width: 100%; justify-content: flex-start; }
+  .ph-grid { grid-template-columns: repeat(2, 1fr); }
+  .tl-item { grid-template-columns: 48px 30px 1fr; }
+  .tl-item:not(:last-child)::before { left: calc(48px + 10px + 14px); }
+}
+
+/* ── 列印:A4,每一段一頁起 ── */
+@page { size: A4; margin: 0; }
+@media print {
+  body { background: var(--paper); }
+  .toolbar { display: none; }
+  #book { padding: 0; gap: 0; display: block; }
+  .page { width: 210mm; min-height: 297mm; box-shadow: none; break-after: page; margin: 0; }
+  .page:last-child { break-after: auto; }
+  .day { min-height: 0; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+</head>
+<body>
+<div class="toolbar">
+  <a id="back-link" href="index.html">← 回行程</a>
+  <label><input type="checkbox" id="opt-memory" checked onchange="rerender()"> 回憶照片</label>
+  <label><input type="checkbox" id="opt-planning" onchange="rerender()"> 規劃照片</label>
+  <label><input type="checkbox" id="opt-expense" checked onchange="rerender()"> 旅費帳本</label>
+  <label><input type="checkbox" id="opt-memo" checked onchange="rerender()"> 隨筆格線</label>
+  <span class="spacer"></span>
+  <span id="status" role="status" aria-live="polite">載入中…</span>
+  <button id="btn-print" onclick="printBook()" disabled>🖨 列印 / 存成 PDF</button>
+</div>
+<main id="book"></main>
+<script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyC-QgKIKtZkmWIOXawmGBHVci4kKJOF7W0&callback=initMap&loading=async" async defer></script>
+</body>
+</html>
