@@ -89,6 +89,9 @@ function loadPoi() {
     document.getElementById('poi-name').value = poiData.name || '';
     document.getElementById('poi-category').value = poiData.category || 'attraction';
     document.getElementById('poi-address').value = poiData.address || '';
+    document.getElementById('poi-parking').value = poiData.parking || '';
+    const pn = document.getElementById('poi-parking-note');
+    if (document.activeElement !== pn) pn.value = poiData.parkingNote || '';
     document.getElementById('poi-links').value = (poiData.links && Object.values(poiData.links).join('\n')) || '';
     const art = document.getElementById('poi-article');
     if (document.activeElement !== art) art.value = poiData.article || '';
@@ -602,6 +605,19 @@ body.embed .wrap { padding:12px 12px; }
           <input id="poi-address" onchange="savePoiField('address', this.value)">
         </div>
       </div>
+      <div class="field-row">
+        <div class="field" style="max-width:160px">
+          <label for="poi-parking">🅿️ 停車</label>
+          <select id="poi-parking" onchange="savePoiField('parking', this.value)">
+            <option value="">未確認</option><option value="yes">有停車場</option>
+            <option value="nearby">附近有</option><option value="no">無停車場</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="poi-parking-note">停車說明</label>
+          <input id="poi-parking-note" placeholder="位置、費用、台數…" onchange="savePoiField('parkingNote', this.value)">
+        </div>
+      </div>
       <div class="field">
         <label>相關連結（每行一個網址）</label>
         <textarea id="poi-links" rows="2" onchange="savePoiLinks(this.value)"></textarea>
@@ -640,7 +656,11 @@ body.embed .wrap { padding:12px 12px; }
       <div class="ph-grid" id="poi-photo-grid"></div>
       <div class="empty-hint" id="poi-photo-empty">尚無照片</div>
       <input type="file" id="poi-photo-file" accept="image/*" multiple style="display:none" onchange="uploadPoiPhotos(this.files)">
-      <button class="upload-btn" onclick="document.getElementById('poi-photo-file').click()">⬆ 上傳照片</button>
+      <input type="file" id="poi-photo-camera" accept="image/*" capture="environment" style="display:none" onchange="uploadPoiPhotos(this.files)">
+      <div class="upload-row">
+        <button class="upload-btn btn-camera" onclick="document.getElementById('poi-photo-camera').click()">📷 拍照</button>
+        <button class="upload-btn" onclick="document.getElementById('poi-photo-file').click()"><span class="lbl-album">🖼 相簿</span><span class="lbl-upload">⬆ 上傳照片</span></button>
+      </div>
     </div>
   </div>
 

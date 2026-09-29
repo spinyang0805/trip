@@ -281,6 +281,25 @@ const SPOT_TYPES = {
   gas:        { icon:'⛽', label:'加油', color:'#546e7a' },
 };
 
+const PARKING_OPTS = [['', '未確認'], ['yes', '有停車場'], ['nearby', '附近有'], ['no', '無停車場']];
+const PARKING_CHIP = { yes: '🅿️ 有停車場', nearby: '🅿️ 附近有停車', no: '🚫 無停車場' };
+// 停車資訊:景點有連到共用景點庫就存在景點上(所有行程共用、詳情頁也能改),否則存在這個行程的景點
+function parkingOf(sp) {
+  const poi = sp.poiId ? poisCache[sp.poiId] : null;
+  return poi ? { parking: poi.parking || '', parkingNote: poi.parkingNote || '', shared: true }
+             : { parking: sp.parking || '', parkingNote: sp.parkingNote || '', shared: false };
+}
+window.updateParking = function(dayId, spotId, field, value) {
+  const sp = tripData.days[dayId]?.spots?.[spotId];
+  if (!sp) return;
+  if (sp.poiId && poisCache[sp.poiId]) {
+    poisCache[sp.poiId][field] = value;
+    update(ref(db, `pois/${sp.poiId}`), { [field]: value, updatedBy: currentUser.uid, updatedAt: Date.now() });
+  } else {
+    updateSpot(dayId, spotId, field, value);
+  }
+};
+
 const DAY_COLORS = ['#4a7c59','#c4783a','#2e6da4','#8e44ad','#c0392b','#16a085','#d4a843','#1a6b8a'];
 
 function renderSpot(dayId, sp, i, dayColor, total, sch = {}, isNext = false) {
@@ -293,7 +312,7 @@ function renderSpot(dayId, sp, i, dayColor, total, sch = {}, isNext = false) {
 
   let warnHtml = '';
   const dayDate = tripData.days[dayId]?.date;
-  const checkTime = sp.time || (sch.eta != null ? minToHm(sch.eta) : '');
+  const checkTime = sch.arrive != null ? minToHm(sch.arrive) : '';
   if (sp.poiId && dayDate && checkTime) {
     const closed = isSpotClosed(sp.poiId, dayDate, checkTime);
     if (closed === true) {
@@ -302,14 +321,17 @@ function renderSpot(dayId, sp, i, dayColor, total, sch = {}, isNext = false) {
       warnHtml = `<span class="spot-warn" title="當日營業時間：${esc(hoursTxt)}">⚠️ 可能未營業</span>`;
     }
   }
-  if (sch.late != null) warnHtml += `<span class="spot-warn" title="依前一站時間+停留+車程推算">⚠️ 預計 ${minToHm(sch.late)} 才到</span>`;
+  if (sch.late) warnHtml += `<span class="spot-warn" title="依前一站到達+停留+車程推算">⚠️ 比預定 ${minToHm(sch.set)} 晚 ${fmtStay(sch.late)}</span>`;
 
-  const timeHtml = sp.time
-    ? `<span class="sc-time">${sp.time}</span>`
-    : sch.eta != null ? `<span class="sc-time eta" title="依前一站時間+停留+車程推算">約 ${minToHm(sch.eta)}</span>` : '';
+  const timeHtml = sch.arrive == null ? ''
+    : sch.eta
+      ? `<span class="sc-time eta" title="依前一站到達+停留+車程推算">約 ${minToHm(sch.arrive)}</span>`
+      : `<span class="sc-time" title="${i === 0 ? '出發時間' : '預定時間(提早到會等到這個時間)'}">${minToHm(sch.arrive)}</span>`
+        + (sch.wait >= 15 ? `<span class="sc-wait" title="提早抵達,到預定時間前的空檔">⏳ 空檔 ${fmtStay(sch.wait)}</span>` : '');
   const stay = parseInt(sp.stay) || 0;
   const cost = parseFloat(sp.cost) || 0;
   const booked = sp.expenseId && expensesCache[sp.expenseId];
+  const pk = parkingOf(sp);
 
   return `
   <li class="spot-item ${open ? 'open' : ''} ${isNext ? 'is-next' : ''}" data-spot="${sp.id}" data-day="${dayId}">
@@ -329,6 +351,8 @@ function renderSpot(dayId, sp, i, dayColor, total, sch = {}, isNext = false) {
         ${stay ? `<span class="sc-stay">停 ${fmtStay(stay)}</span>` : ''}
         ${cost ? `<span class="sc-cost">${symbolFor(sp.costCurrency||baseCurrency)}${cost.toLocaleString()}</span>` : ''}
         ${booked ? '<span class="sc-booked" title="已記入費用頁">✓ 已記帳</span>' : ''}
+        ${sp.resvOn ? `<span class="sc-resv" title="${esc([sp.resvName && '訂位人 ' + sp.resvName, sp.resvCode && '代號 ' + sp.resvCode, sp.resvNote].filter(Boolean).join('・'))}">🍽 已訂位${sp.resvPeople ? '・' + sp.resvPeople + ' 位' : ''}</span>` : ''}
+        ${pk.parking ? `<span class="sc-park sc-park-${pk.parking}" title="${esc(pk.parkingNote)}">${PARKING_CHIP[pk.parking]}</span>` : ''}
         ${!sp.lat ? '<span class="sc-nogeo" title="沒有定位,地圖與車程不會計算">📍 未定位</span>' : ''}
         ${sp.note ? `<span class="sc-note">${esc(sp.note)}</span>` : ''}
       </div>
@@ -339,7 +363,7 @@ function renderSpot(dayId, sp, i, dayColor, total, sch = {}, isNext = false) {
       <button class="btn-spot-toggle" title="${open ? '收合' : '編輯'}" onclick="toggleSpot('${dayId}','${sp.id}')">${open ? '▴' : '✎'}</button>
     </div>
     ${open ? `
-    <div class="spot-edit">
+    <div class="spot-edit ${sp.resvOn ? 'resv-on' : ''}">
       <div class="se-row">
         <input class="spot-name-inp" value="${esc(sp.name||'')}" placeholder="景點名稱"
           onchange="updateSpot('${dayId}','${sp.id}','name',this.value)"
@@ -349,7 +373,7 @@ function renderSpot(dayId, sp, i, dayColor, total, sch = {}, isNext = false) {
         </select>
       </div>
       <div class="se-row">
-        <label class="se-field">到達
+        <label class="se-field"><span class="lbl-plan">${i === 0 ? '出發時間' : '預定時間(選填)'}</span><span class="lbl-resv">🍽 訂位時間</span>
           <input class="spot-time" type="time" value="${sp.time||''}"
             onchange="updateSpot('${dayId}','${sp.id}','time',this.value)"></label>
         <label class="se-field">停留(分)
@@ -366,6 +390,42 @@ function renderSpot(dayId, sp, i, dayColor, total, sch = {}, isNext = false) {
       </div>
       <input class="spot-note" value="${esc(sp.note||'')}" placeholder="備註…"
         onchange="updateSpot('${dayId}','${sp.id}','note',this.value)">
+      <div class="se-box">
+        <label class="toggle-label se-resv-toggle">
+          <input type="checkbox" ${sp.resvOn ? 'checked' : ''}
+            onchange="this.closest('.spot-edit').classList.toggle('resv-on', this.checked);updateSpot('${dayId}','${sp.id}','resvOn',this.checked)">
+          🍽 已訂位
+        </label>
+        <div class="se-resv">
+          <div class="se-row">
+            <label class="se-field">訂位人
+              <input class="se-inp" value="${esc(sp.resvName||'')}" placeholder="姓名"
+                onchange="updateSpot('${dayId}','${sp.id}','resvName',this.value)"></label>
+            <label class="se-field">人數
+              <input class="se-inp se-narrow" type="number" min="1" inputmode="numeric" value="${sp.resvPeople||''}" placeholder="4"
+                onchange="updateSpot('${dayId}','${sp.id}','resvPeople',parseInt(this.value)||'')"></label>
+            <label class="se-field">訂位代號
+              <input class="se-inp" value="${esc(sp.resvCode||'')}" placeholder="確認碼"
+                onchange="updateSpot('${dayId}','${sp.id}','resvCode',this.value)"></label>
+            <label class="se-field">電話
+              <input class="se-inp" type="tel" value="${esc(sp.resvPhone||'')}" placeholder="+81 …"
+                onchange="updateSpot('${dayId}','${sp.id}','resvPhone',this.value)"></label>
+          </div>
+          <input class="spot-note" value="${esc(sp.resvNote||'')}" placeholder="訂位備註(座位、套餐、訂金…)"
+            onchange="updateSpot('${dayId}','${sp.id}','resvNote',this.value)">
+          <div class="se-hint">訂位時間請填在上方時間欄;太早抵達會等到訂位時間,晚到會提醒。
+            ${sp.resvPhone ? `<a class="se-call" href="tel:${esc(sp.resvPhone.replace(/[^\d+]/g, ''))}">📞 撥打訂位電話</a>` : ''}</div>
+        </div>
+      </div>
+      <div class="se-box se-row">
+        <label class="se-field">🅿️ 停車
+          <select class="se-inp" onchange="updateParking('${dayId}','${sp.id}','parking',this.value)">
+            ${PARKING_OPTS.map(([v, l]) => `<option value="${v}" ${pk.parking === v ? 'selected' : ''}>${l}</option>`).join('')}
+          </select></label>
+        <label class="se-field se-grow">停車說明${pk.shared ? '<span class="se-shared" title="存在共用景點庫,所有行程與景點詳情頁都看得到">・共用</span>' : ''}
+          <input class="se-inp" value="${esc(pk.parkingNote)}" placeholder="位置、費用、台數…"
+            onchange="updateParking('${dayId}','${sp.id}','parkingNote',this.value)"></label>
+      </div>
       ${sp.type === 'toll' ? `
       <label class="toggle-label">
         <input type="checkbox" ${sp.avoidToll?'checked':''} onchange="updateSpot('${dayId}','${sp.id}','avoidToll',this.checked)">
@@ -447,13 +507,19 @@ function computeSchedule(day) {
       const sec = legSeconds(prev, sp, avoid);
       if (sec != null) cursor = depart + sec / 60;
     }
+    // 第一站(或前面算不出來時)用填的時間當出發/到達;之後一律「前站到達+停留+車程」。
+    // 有填時間的站視為「最早開始」:提早到就等到該時間(例如訂位),晚到就用推算時間並標示晚多久。
     const r = {};
     const t = hmToMin(sp.time);
-    if (t != null) {
-      r.arrive = t;
-      if (cursor != null && cursor > t + 5) r.late = cursor;
-    } else if (cursor != null) {
-      r.arrive = r.eta = cursor;
+    if (cursor != null) {
+      if (t != null && t >= cursor) {
+        r.arrive = t; r.fixed = true; r.wait = Math.round(t - cursor);
+      } else {
+        r.arrive = cursor; r.eta = true; r.set = t;
+        if (t != null && cursor - t > 5) r.late = Math.round(cursor - t);
+      }
+    } else if (t != null) {
+      r.arrive = t; r.fixed = true;
     }
     out[sp.id] = r;
     depart = r.arrive != null ? r.arrive + (parseInt(sp.stay) || 0) : null;
@@ -2384,6 +2450,29 @@ body.no-select { user-select:none; -webkit-user-select:none; }
 .sc-row2 { display:flex; flex-wrap:wrap; gap:3px 8px; align-items:center; margin-top:3px; font-size:.72rem; color:var(--muted); }
 .sc-time { color:var(--text); font-weight:600; }
 .sc-time.eta { color:var(--muted); font-style:italic; font-weight:400; }
+.sc-wait { color:var(--muted); font-size:.72rem; }
+.sc-resv { color:#f0b35a; white-space:nowrap; }
+.sc-park { white-space:nowrap; }
+.sc-park-yes, .sc-park-nearby { color:#58a6ff; }
+.sc-park-no { color:#f0883e; }
+/* 訂位/停車編輯區 */
+.se-box { border-top:1px dashed rgba(255,255,255,.08); padding-top:10px; display:flex; flex-direction:column; gap:8px; }
+.se-box.se-row { flex-direction:row; }
+.se-resv { display:none; flex-direction:column; gap:8px; }
+.spot-edit.resv-on .se-resv { display:flex; }
+.lbl-resv { display:none; }
+.spot-edit.resv-on .lbl-resv { display:inline; color:#f0b35a; }
+.spot-edit.resv-on .lbl-plan { display:none; }
+.se-inp { background:transparent; border:none; border-bottom:1px dashed rgba(255,255,255,.15); color:var(--text); font-size:.8rem; padding:3px 0; outline:none; font-family:inherit; min-width:0; width:120px; }
+select.se-inp { background:var(--surface2); border:1px solid var(--border); border-radius:6px; padding:4px 6px; width:auto; }
+.se-narrow { width:56px; }
+.se-grow { flex:1; min-width:140px; }
+.se-grow .se-inp { width:100%; }
+.se-hint { font-size:.72rem; color:var(--muted); }
+.se-shared { color:var(--gold); }
+.se-call { color:#58a6ff; margin-left:8px; white-space:nowrap; text-decoration:none; }
+.se-resv-toggle { font-size:.8rem !important; color:var(--text); min-height:32px; }
+.se-resv-toggle input { width:18px; height:18px; accent-color:#f0b35a; }
 .sc-stay { background:rgba(255,255,255,.06); border-radius:4px; padding:0 5px; }
 .sc-cost { color:var(--gold); }
 .sc-booked { color:var(--green); }
@@ -2753,7 +2842,9 @@ body.readonly .day-date, body.readonly #budget-total, body.readonly #trip-title 
     </div>
     <div class="pm-foot">
       <input type="file" id="pm-file" accept="image/*" multiple style="display:none" onchange="uploadPhotos(this.files)">
-      <button class="pm-upload-btn" onclick="document.getElementById('pm-file').click()">⬆ 上傳照片</button>
+      <input type="file" id="pm-camera" accept="image/*" capture="environment" style="display:none" onchange="uploadPhotos(this.files)">
+      <button class="pm-upload-btn btn-camera" onclick="document.getElementById('pm-camera').click()">📷 拍照</button>
+      <button class="pm-upload-btn" onclick="document.getElementById('pm-file').click()"><span class="lbl-album">🖼 相簿</span><span class="lbl-upload">⬆ 上傳照片</span></button>
       <span class="pm-hint" id="pm-hint">自動壓縮後上傳</span>
     </div>
   </div>

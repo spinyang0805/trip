@@ -44,8 +44,9 @@ const CATEGORY_ICONS = { 餐廳:'🍜', 小吃:'🍡', 交通:'🚗', 住宿:'�
 const DAY_COLORS = ['#4a7c59','#c4783a','#2e6da4','#8e44ad','#c0392b','#16a085','#b8892f','#1a6b8a'];
 const CURRENCY_SYMBOLS = { JPY:'¥', TWD:'NT$', USD:'$', EUR:'€', KRW:'₩', CNY:'¥', HKD:'HK$', THB:'฿', VND:'₫', GBP:'£', AUD:'A$', SGD:'S$' };
 const DOW_TW = ['日','一','二','三','四','五','六'];
+const PARKING_TXT = { yes: '🅿️ 有停車場', nearby: '🅿️ 附近有停車', no: '🚫 無停車場' };
 
-let project = {}, trip = {}, photos = {}, expenses = [], members = [];
+let project = {}, trip = {}, photos = {}, expenses = [], members = [], pois = {};
 let baseCurrency = 'JPY', currencyRates = {};
 const routes = {};   // dayId -> { legs: [{sec, m, skipped}], polylines: [enc], ok }
 
@@ -94,6 +95,9 @@ onAuthStateChanged(auth, async user => {
   photos = p.val() || {};
   expenses = Object.entries(e.val() || {}).map(([id, x]) => ({ id, ...x }));
   members = Object.entries(project.members || {}).map(([id, m]) => ({ id, name: m.name || id }));
+  // 停車資訊存在共用景點庫
+  const poiIds = [...new Set(Object.values(trip.days || {}).flatMap(d => Object.values(d.spots || {}).map(s => s.poiId).filter(Boolean)))];
+  (await Promise.all(poiIds.map(id => get(ref(db, `pois/${id}`))))).forEach((snap, i) => { if (snap.val()) pois[poiIds[i]] = snap.val(); });
   baseCurrency = project.baseCurrency || 'JPY';
   currencyRates = project.currencyRates || {};
   document.title = `${trip.title || project.title || '旅遊'}｜旅遊手札`;
@@ -246,8 +250,13 @@ function renderDay(dayId, idx, opt) {
       const leg = r?.legs?.[prevGeo];
       if (leg?.sec) eta = depart + leg.sec / 60;
     }
+    // 同 trip.html:第一站用填的時間;之後=前站到達+停留+車程,填的時間是「最早開始」
     const t = hmToMin(sp.time);
-    const arrive = t ?? eta;
+    let arrive, est = false, late = 0;
+    if (eta != null) {
+      if (t != null && t >= eta) arrive = t;
+      else { arrive = eta; est = true; if (t != null && eta - t > 5) late = Math.round(eta - t); }
+    } else arrive = t;
     depart = arrive != null ? arrive + (parseInt(sp.stay) || 0) : null;
     if (geoIdx[sp.id] != null) prevGeo = geoIdx[sp.id];
     const type = SPOT_TYPES[sp.type] || SPOT_TYPES.attraction;
@@ -256,16 +265,22 @@ function renderDay(dayId, idx, opt) {
     const legHtml = !isLast && leg
       ? `<div class="tl-leg">${leg.skipped ? `✈️ 移動 約 ${fmtKm(leg.m)}` : `🚗 ${fmtDur(leg.sec/60)}・${fmtKm(leg.m)}`}</div>` : '';
     const cost = parseFloat(sp.cost) || 0;
+    const poi = sp.poiId ? pois[sp.poiId] : null;
+    const pk = poi ? { parking: poi.parking, parkingNote: poi.parkingNote } : { parking: sp.parking, parkingNote: sp.parkingNote };
     return `<li class="tl-item">
-      <div class="tl-time">${t != null ? minToHm(t) : eta != null ? `<i>約 ${minToHm(eta)}</i>` : ''}</div>
+      <div class="tl-time">${arrive == null ? '' : est ? `<i>約 ${minToHm(arrive)}</i>` : minToHm(arrive)}</div>
       <div class="tl-dot" style="border-color:${color};color:${color}">${i+1}</div>
       <div class="tl-body">
         <div class="tl-name">${esc(sp.name || '(未命名)')}<span class="tl-type">${type.icon} ${type.label}</span></div>
         <div class="tl-meta">
           ${sp.stay ? `<span>停留 ${fmtDur(parseInt(sp.stay))}</span>` : ''}
           ${cost ? `<span>${sym(sp.costCurrency || baseCurrency)}${cost.toLocaleString()}</span>` : ''}
+          ${sp.resvOn ? `<span class="tl-resv">🍽 已訂位${sp.resvPeople ? `・${sp.resvPeople} 位` : ''}${sp.resvName ? `・${esc(sp.resvName)}` : ''}${sp.resvCode ? `・代號 ${esc(sp.resvCode)}` : ''}</span>` : ''}
+          ${pk.parking ? `<span>${PARKING_TXT[pk.parking]}${pk.parkingNote ? `(${esc(pk.parkingNote)})` : ''}</span>` : ''}
+          ${late ? `<span class="tl-late">比預定 ${minToHm(t)} 晚 ${fmtDur(late)}</span>` : ''}
         </div>
         ${sp.note ? `<div class="tl-note">${esc(sp.note)}</div>` : ''}
+        ${sp.resvOn && sp.resvNote ? `<div class="tl-note">🍽 ${esc(sp.resvNote)}</div>` : ''}
         ${legHtml}
       </div>
     </li>`;
@@ -441,8 +456,10 @@ h4 { font-family: 'Noto Serif TC', serif; font-size: 15px; margin: 18px 0 10px; 
 .tl-body { padding: 3px 0 14px; }
 .tl-name { font-size: 16px; font-weight: 700; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
 .tl-type { font-size: 12px; font-weight: 400; color: var(--muted); }
-.tl-meta { display: flex; gap: 12px; font-size: 13px; color: var(--ink-2); }
+.tl-meta { display: flex; flex-wrap: wrap; gap: 2px 12px; font-size: 13px; color: var(--ink-2); }
 .tl-meta:empty { display: none; }
+.tl-late { color: var(--accent); }
+.tl-resv { color: #a86a1c; font-weight: 700; }
 .tl-note { font-size: 13px; color: var(--ink-2); background: var(--paper-2); border-left: 3px solid var(--gold); padding: 4px 10px; margin-top: 4px; white-space: pre-wrap; }
 .tl-leg { font-size: 12px; color: var(--muted); margin-top: 8px; }
 .empty { color: var(--muted); padding: 20px 0; }

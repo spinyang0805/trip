@@ -213,3 +213,13 @@ nav { top: env(safe-area-inset-top); }
 
 /* 螢幕閱讀器專用文字 */
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+
+/* ── 拍照按鈕:只在觸控裝置(手機/平板)出現,直接開相機;電腦版維持「上傳照片」 ── */
+.btn-camera, .lbl-album { display: none; }
+@media (hover: none) and (pointer: coarse) {
+  .btn-camera { display: inline-flex; align-items: center; justify-content: center; }
+  .lbl-album { display: inline; }
+  .lbl-upload { display: none; }
+}
+.upload-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.upload-row .upload-btn { flex: 1; width: auto; }
