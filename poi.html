@@ -30,7 +30,9 @@ const db      = getDatabase(app);
 const storage = getStorage(app);
 
 const params    = new URLSearchParams(location.search);
-const poiId     = params.get('id');          // null = project docs mode
+const poiId     = params.get('id');          // null = 舊的專案文件夾網址
+// 專案文件夾已併入行程頁的「📌 資訊」
+if (!poiId) location.replace(`trip.html?project=${encodeURIComponent(params.get('project') || 'main')}&open=info`);
 const projectId = params.get('project');
 const isEmbed   = params.get('embed') === '1';
 if (isEmbed) document.body.classList.add('embed');

@@ -112,6 +112,7 @@ onAuthStateChanged(auth, async user => {
   loadTrip();
   loadPhotos();
   loadExpenses();
+  loadDocs();
 });
 
 // ── LOAD TRIP ─────────────────────────────────
@@ -130,6 +131,7 @@ function loadTrip() {
     }
     cacheTrip();
     renderWhenIdle();
+    if (urlParams.get('open') === 'info' && !loadTrip._opened) { loadTrip._opened = true; openInfo(); }
   });
 }
 
@@ -225,6 +227,7 @@ function renderAll() {
           <span class="day-pill" style="background:${color}22;color:${color}">Day ${idx+1}</span>
           ${isToday ? '<span class="today-pill">今天</span>' : ''}
           <input class="day-date" type="date" value="${day.date||''}" onchange="updateDayDate('${dayId}',this.value)">
+          ${dowHtml(dayId)}
           <span class="day-wx" id="wx-${dayId}">${wxHtml(dayId)}</span>
         </div>
         <div class="day-hd-right">
@@ -519,12 +522,15 @@ window.doUndo = function() {
 
 // ── WEATHER(Open-Meteo,免 key,只抓 16 天內)──
 const wxCache = {};
-function wxKey(dayId) {
+// 用當天最後一個有定位的景點(通常是住宿/目的地),避免抓到出發地機場
+function wxSpot(dayId) {
   const day = tripData.days?.[dayId];
   if (!day?.date) return null;
-  // 用當天最後一個有定位的景點(通常是住宿/目的地),避免抓到出發地機場
-  const sp = [...getSpotsArray(day)].reverse().find(s => s.lat && s.lng);
-  return sp ? `${sp.lat.toFixed(2)},${sp.lng.toFixed(2)},${day.date}` : null;
+  return [...getSpotsArray(day)].reverse().find(s => s.lat && s.lng) || null;
+}
+function wxKey(dayId) {
+  const sp = wxSpot(dayId);
+  return sp ? `${sp.lat.toFixed(2)},${sp.lng.toFixed(2)},${tripData.days[dayId].date}` : null;
 }
 function wxIcon(c) {
   return c === 0 ? '☀️' : c <= 2 ? '🌤️' : c === 3 ? '☁️' : c <= 48 ? '🌫️' : c <= 57 ? '🌦️'
@@ -549,12 +555,27 @@ function loadWeather(dayKeys) {
         const d = j.daily;
         if (!d?.time?.length) { wxCache[k] = ''; return; }
         const rain = d.precipitation_probability_max?.[0];
-        wxCache[k] = `<span title="天氣預報(Open-Meteo)">${wxIcon(d.weather_code[0])} ${Math.round(d.temperature_2m_max[0])}°/${Math.round(d.temperature_2m_min[0])}°${rain != null ? ` ☔${rain}%` : ''}</span>`;
+        const place = wxSpot(dayId)?.name || '';
+        wxCache[k] = `<span title="${esc(place)} 的天氣預報(Open-Meteo)">${wxIcon(d.weather_code[0])} ${Math.round(d.temperature_2m_max[0])}°/${Math.round(d.temperature_2m_min[0])}°${rain != null ? ` ☔${rain}%` : ''}<span class="wx-place">📍${esc(place.length > 8 ? place.slice(0, 8) + '…' : place)}</span></span>`;
         const el = document.getElementById('wx-' + dayId);
         if (el) el.innerHTML = wxCache[k];
       })
       .catch(() => { wxCache[k] = ''; });
   });
+}
+
+// 星期:一律顯示台灣的「週四」;當天地點在日本時再加日本的「木曜日」
+const DOW_TW = ['日','一','二','三','四','五','六'];
+const DOW_JP = ['日','月','火','水','木','金','土'];
+function inJapan(sp) {
+  // 日本本土到沖繩/與那國;台灣經度在 122° 以西,不會誤判
+  return sp && sp.lat >= 24 && sp.lat <= 46 && sp.lng >= 122.9 && sp.lng <= 146;
+}
+function dowHtml(dayId) {
+  const date = tripData.days?.[dayId]?.date;
+  if (!date) return '';
+  const w = new Date(date + 'T00:00:00').getDay();
+  return `<span class="day-dow">週${DOW_TW[w]}${inJapan(wxSpot(dayId)) ? `<span class="dow-jp">${DOW_JP[w]}曜日</span>` : ''}</span>`;
 }
 
 // ── EXPENSES(實際花費,寫入費用頁同一份資料)──
@@ -644,16 +665,48 @@ window.openInfo = function() {
   document.getElementById('info-modal-mask').classList.add('open');
 };
 window.closeInfo = function() { document.getElementById('info-modal-mask').classList.remove('open'); };
+// 文件(原「📁 文件」頁):docs/{pid},檔案在 Storage。infoCat 決定放在哪個分類;
+// 景點詳情頁上傳的(spotPoiId)列在「📍 景點文件」;舊的專案文件沒有分類 → 📝 其他
+let docsCache = {};
+const pendingDocDelete = new Map();   // docId -> timer(刪除 6 秒內可復原,時間到才真的刪檔)
+function loadDocs() {
+  onValue(ref(db, `docs/${projectId}`), snap => {
+    docsCache = snap.val() || {};
+    if (isModalOpen('info-modal-mask')) renderInfo();
+  });
+}
+function docCat(d) { return d.infoCat || (d.spotPoiId ? null : 'other'); }
+function docRowHtml(id, d) {
+  const icon = d.mime?.includes('pdf') ? '📄' : d.mime?.startsWith('image/') ? '🖼️' : '📎';
+  const size = d.size > 1048576 ? (d.size / 1048576).toFixed(1) + ' MB' : Math.round((d.size || 0) / 1024) + ' KB';
+  const canDel = !offlineMode && (d.uploadedBy === currentUser?.uid || currentUd?.isAdmin);
+  const catSel = offlineMode ? '' : `<select class="doc-cat" title="移到分類" onchange="setDocCat('${id}', this.value)">
+      ${d.spotPoiId && !d.infoCat ? '<option value="">📍 景點文件</option>' : ''}
+      ${Object.entries(INFO_CATS).map(([k, v]) => `<option value="${k}" ${docCat(d) === k ? 'selected' : ''}>${v}</option>`).join('')}
+    </select>`;
+  return `<div class="doc-row">
+    <span class="doc-icon">${icon}</span>
+    <div class="doc-info">
+      <a href="${d.url}" target="_blank" rel="noopener" class="doc-name">${esc(d.fileName || '')}</a>
+      <div class="doc-meta">${size}｜${esc(d.uploaderName || '')}｜${new Date(d.uploadedAt).toLocaleDateString('zh-TW')}</div>
+    </div>
+    ${catSel}
+    ${canDel ? `<button class="btn-ic danger" onclick="deleteDoc('${id}')">🗑</button>` : ''}
+  </div>`;
+}
 function renderInfo() {
   const items = Object.entries(tripData.info || {});
+  const docs = Object.entries(docsCache).filter(([id]) => !pendingDocDelete.has(id))
+    .sort((a, b) => (a[1].uploadedAt || 0) - (b[1].uploadedAt || 0));
   const el = document.getElementById('info-list');
-  if (!items.length) {
-    el.innerHTML = '<div class="pm-empty">還沒有資料。把航班、訂房代號、飯店電話、租車確認、緊急聯絡人記在這裡,全家都看得到。</div>';
+  if (!items.length && !docs.length) {
+    el.innerHTML = '<div class="pm-empty">還沒有資料。把航班、訂房代號、飯店電話、租車確認、緊急聯絡人記在這裡,電子機票、訂房確認信也可以直接上傳,全家都看得到。</div>';
     return;
   }
-  el.innerHTML = Object.keys(INFO_CATS).map(cat => {
+  let html = Object.keys(INFO_CATS).map(cat => {
     const list = items.filter(([, it]) => (it.cat || 'other') === cat).sort((a, b) => (a[1].createdAt || 0) - (b[1].createdAt || 0));
-    if (!list.length) return '';
+    const catDocs = docs.filter(([, d]) => docCat(d) === cat);
+    if (!list.length && !catDocs.length) return '';
     return `<div class="ii-cat">${INFO_CATS[cat]}</div>` + list.map(([id, it]) => `
       <div class="info-item">
         <div class="ii-head"><b>${esc(it.title || '')}</b>
@@ -661,9 +714,68 @@ function renderInfo() {
           <button class="btn-ic danger" onclick="deleteInfoItem('${id}')">🗑</button>`}
         </div>
         ${it.body ? `<div class="ii-body">${linkify(esc(it.body))}</div>` : ''}
-      </div>`).join('');
+      </div>`).join('') + catDocs.map(([id, d]) => docRowHtml(id, d)).join('');
   }).join('');
+
+  // 景點詳情頁上傳、還沒歸類的文件:依景點分組
+  const poiDocs = docs.filter(([, d]) => docCat(d) === null);
+  if (poiDocs.length) {
+    const groups = new Map();
+    poiDocs.forEach(([id, d]) => { if (!groups.has(d.spotPoiId)) groups.set(d.spotPoiId, []); groups.get(d.spotPoiId).push([id, d]); });
+    html += '<div class="ii-cat">📍 景點文件</div>' + [...groups.entries()].map(([pid, list]) => `
+      <div class="doc-poi"><a href="poi.html?id=${pid}&project=${projectId}">${esc(poisCache[pid]?.name || '未知景點')}</a></div>` +
+      list.map(([id, d]) => docRowHtml(id, d)).join('')).join('');
+  }
+  el.innerHTML = html;
 }
+window.setDocCat = async function(id, cat) {
+  try { await update(ref(db, `docs/${projectId}/${id}`), { infoCat: cat || null }); }
+  catch (e) { console.error(e); showToast('更新失敗'); }
+};
+window.uploadInfoDocs = async function(files) {
+  if (!files?.length) return;
+  if (offlineMode) { showToast('📴 離線模式無法上傳'); return; }
+  const cat = document.getElementById('info-cat').value;
+  for (const file of files) {
+    if (file.size > 10 * 1048576) { showToast(`「${file.name}」超過 10MB 上限`); continue; }
+    try {
+      showToast(`上傳中：${file.name}…`);
+      const docId = 'doc_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+      const path = `projects/${projectId}/docs/${docId}_${file.name}`;
+      await uploadBytes(sRef(storage, path), file, { contentType: file.type || 'application/octet-stream' });
+      const url = await getDownloadURL(sRef(storage, path));
+      await set(ref(db, `docs/${projectId}/${docId}`), {
+        infoCat: cat, spotPoiId: null,
+        fileName: file.name, url, storagePath: path,
+        size: file.size, mime: file.type || '',
+        uploadedBy: currentUser.uid, uploaderName: currentUd?.name || '',
+        uploadedAt: Date.now()
+      });
+      showToast(`已上傳：${file.name} ✓`);
+    } catch (e) {
+      console.error(e);
+      showToast('上傳失敗：' + (e.code || e.message || ''));
+      break;
+    }
+  }
+  document.getElementById('info-file').value = '';
+};
+window.deleteDoc = function(id) {
+  const d = docsCache[id];
+  if (!d) return;
+  const timer = setTimeout(async () => {
+    pendingDocDelete.delete(id);
+    try { if (d.storagePath) await deleteObject(sRef(storage, d.storagePath)); } catch (e) {}
+    await remove(ref(db, `docs/${projectId}/${id}`));
+  }, 6500);
+  pendingDocDelete.set(id, timer);
+  renderInfo();
+  showUndo(`已刪除「${d.fileName}」`, () => {
+    clearTimeout(pendingDocDelete.get(id));
+    pendingDocDelete.delete(id);
+    renderInfo();
+  });
+};
 window.resetInfoForm = function() {
   infoEditId = null;
   document.getElementById('info-title').value = '';
@@ -2267,6 +2379,17 @@ body.readonly .day-date, body.readonly #budget-total, body.readonly #trip-title 
 .ii-head b { flex:1; font-size:.86rem; }
 .ii-body { font-size:.8rem; color:var(--muted); white-space:pre-wrap; margin-top:4px; word-break:break-word; line-height:1.6; }
 .ii-body a { color:#58a6ff; }
+.doc-row { display:flex; align-items:center; gap:8px; background:var(--surface2); border-radius:8px; padding:8px 10px; margin-bottom:8px; }
+.doc-icon { font-size:1.1rem; }
+.doc-info { flex:1; min-width:0; }
+.doc-name { color:#58a6ff; font-size:.84rem; text-decoration:none; display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.doc-meta { font-size:.66rem; color:var(--muted); }
+.doc-cat { background:var(--night); border:1px solid var(--border); border-radius:6px; color:var(--muted); font-size:.68rem; padding:3px; max-width:110px; font-family:inherit; }
+.doc-poi { font-size:.74rem; margin:8px 0 4px; }
+.doc-poi a { color:var(--text); }
+.day-dow { font-size:.72rem; color:var(--text); white-space:nowrap; }
+.dow-jp { color:var(--muted); margin-left:4px; }
+.wx-place { color:var(--muted); font-size:.62rem; margin-left:4px; }
 .info-form { display:flex; flex-direction:column; gap:8px; border-top:1px solid var(--border); padding-top:12px; margin-top:8px; }
 #check-list { margin-top:10px; }
 .check-item { display:flex; align-items:center; gap:10px; padding:10px 4px; border-bottom:1px solid rgba(255,255,255,.05); font-size:.88rem; }
@@ -2432,7 +2555,6 @@ body.readonly .day-date, body.readonly #budget-total, body.readonly #trip-title 
     <div class="toolbar">
       <button class="btn-add-day" onclick="addDay()">＋ 新增天數</button>
       <button class="btn-share" onclick="toggleAllDays()">⬍ 展開/收合</button>
-      <button class="btn-share" onclick="location.href='poi.html?project='+(new URLSearchParams(location.search).get('project')||'main')">📁 文件</button>
       <button class="btn-share" id="btn-members" style="display:none" onclick="openMembers()">👥 成員</button>
       <button class="btn-share" id="btn-today" style="display:none" onclick="jumpToToday()">📍 今天</button>
       <button class="btn-share" onclick="openInfo()">📌 資訊</button>
@@ -2553,7 +2675,10 @@ body.readonly .day-date, body.readonly #budget-total, body.readonly #trip-title 
         <div class="form-row">
           <button class="pm-upload-btn" id="info-save-btn" onclick="saveInfoItem()">＋ 新增</button>
           <button class="btn-share" id="info-cancel-btn" style="display:none" onclick="resetInfoForm()">取消編輯</button>
+          <input type="file" id="info-file" multiple style="display:none" onchange="uploadInfoDocs(this.files)">
+          <button class="btn-share" onclick="document.getElementById('info-file').click()" title="上傳到上方選的分類">📎 上傳檔案</button>
         </div>
+        <div class="pm-hint">上傳的檔案會放進上方選的分類(PDF、圖片等,每個 ≤10MB)</div>
       </div>
     </div>
   </div>
