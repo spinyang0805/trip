@@ -2164,7 +2164,8 @@ nav {
 /* ── MAIN LAYOUT ── */
 .main {
   display: grid;
-  grid-template-columns: 420px 1fr;
+  /* 左欄寬:使用者拖曳過就用 --left-w,否則依螢幕寬自動(平板較窄) */
+  grid-template-columns: var(--left-w, clamp(340px, 34vw, 480px)) 10px 1fr;
   flex: 1;
   overflow: hidden;
   min-height: 0;
@@ -2178,9 +2179,20 @@ nav {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  border-right: 1px solid var(--border);
   transition: transform .35s ease;
 }
+
+/* ── 左右分隔線(可拖曳調整寬度) ── */
+#split-handle { position: relative; cursor: col-resize; background: var(--night); border-left: 1px solid var(--border); touch-action: none; z-index: 40; }
+#split-handle::after { content: ''; position: absolute; top: 50%; left: 50%; width: 4px; height: 44px; transform: translate(-50%, -50%); border-radius: 2px; background: rgba(255,255,255,.18); transition: background .15s, height .15s; }
+#split-handle:hover::after, #split-handle.dragging::after, #split-handle:focus-visible::after { background: var(--accent); height: 72px; }
+#split-handle:focus-visible { outline-offset: -2px; }
+.split-presets { position: absolute; top: 50%; left: 50%; transform: translate(-50%, calc(-50% - 70px)); display: flex; flex-direction: column; gap: 4px; opacity: 0; pointer-events: none; transition: opacity .15s; }
+#split-handle:hover .split-presets, #split-handle:focus-within .split-presets { opacity: 1; pointer-events: auto; }
+.split-presets button { width: 26px; height: 26px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface2); color: var(--muted); font-size: .72rem; cursor: pointer; font-family: inherit; }
+.split-presets button:hover { color: var(--text); border-color: var(--accent); }
+body.resizing, body.resizing * { cursor: col-resize !important; user-select: none !important; }
+body.resizing #map, body.resizing #poi-frame { pointer-events: none; }
 #itinerary-panel::-webkit-scrollbar { width:4px; }
 #itinerary-panel::-webkit-scrollbar-thumb { background:rgba(255,255,255,.1); border-radius:2px; }
 
@@ -2468,6 +2480,7 @@ body.readonly .day-date, body.readonly #budget-total, body.readonly #trip-title 
 /* ── MOBILE ── */
 @media (max-width: 768px) {
   .main { grid-template-columns: 1fr; position: relative; }
+  #split-handle { display: none; }
 
   #itinerary-panel {
     position: absolute; inset: 0;
@@ -2639,6 +2652,15 @@ body.readonly .day-date, body.readonly #budget-total, body.readonly #trip-title 
     </div>
   </div>
 
+  <div id="split-handle" role="separator" aria-orientation="vertical" aria-controls="itinerary-panel"
+       aria-label="調整行程與地圖寬度(左右鍵調整,雙擊還原)" tabindex="0" title="拖曳調整寬度・雙擊還原">
+    <div class="split-presets">
+      <button type="button" data-preset="wide" title="行程寬、地圖小" aria-label="行程寬、地圖小">◧</button>
+      <button type="button" data-preset="auto" title="還原預設" aria-label="還原預設寬度">◫</button>
+      <button type="button" data-preset="narrow" title="行程窄、地圖大" aria-label="行程窄、地圖大">◨</button>
+    </div>
+  </div>
+
   <!-- MAP -->
   <div id="map-panel">
     <div id="map-placeholder">
@@ -2771,6 +2793,73 @@ body.readonly .day-date, body.readonly #budget-total, body.readonly #trip-title 
     </div>
   </div>
 </div>
+
+<script>
+// ── 左右分隔線:拖曳 / 鍵盤 / 預設寬度,存在這台裝置 ──
+(function () {
+  const KEY = 'tm-left-width';
+  const MIN_LEFT = 300, MIN_MAP = 320, STEP = 24;
+  const main = document.querySelector('.main');
+  const handle = document.getElementById('split-handle');
+  if (!main || !handle) return;
+
+  const total = () => main.clientWidth - handle.offsetWidth;
+  const clamp = w => Math.max(MIN_LEFT, Math.min(w, total() - MIN_MAP));
+  const leftNow = () => document.getElementById('itinerary-panel').getBoundingClientRect().width;
+  function apply(w, save) {
+    if (w == null) {
+      main.style.removeProperty('--left-w');
+      if (save) try { localStorage.removeItem(KEY); } catch {}
+    } else {
+      w = Math.round(clamp(w));
+      main.style.setProperty('--left-w', w + 'px');
+      if (save) try { localStorage.setItem(KEY, w); } catch {}
+    }
+    const cur = Math.round(leftNow());
+    handle.setAttribute('aria-valuenow', cur);
+    handle.setAttribute('aria-valuemin', MIN_LEFT);
+    handle.setAttribute('aria-valuemax', Math.max(MIN_LEFT, total() - MIN_MAP));
+  }
+  let saved = null;
+  try { saved = parseInt(localStorage.getItem(KEY)); } catch {}
+  apply(saved > 0 ? saved : null, false);
+  // 視窗變窄時,已存的寬度可能把地圖擠掉 → 重新夾一次(不覆寫存檔)
+  window.addEventListener('resize', () => { if (main.style.getPropertyValue('--left-w')) apply(parseInt(main.style.getPropertyValue('--left-w')), false); });
+
+  let startX = 0, startW = 0, dragging = false;
+  handle.addEventListener('pointerdown', e => {
+    if (e.button !== 0 || e.target.closest('button')) return;
+    dragging = true; startX = e.clientX; startW = leftNow();
+    handle.setPointerCapture(e.pointerId);
+    handle.classList.add('dragging'); document.body.classList.add('resizing');
+    e.preventDefault();
+  });
+  handle.addEventListener('pointermove', e => { if (dragging) apply(startW + e.clientX - startX, false); });
+  const end = e => {
+    if (!dragging) return;
+    dragging = false;
+    handle.classList.remove('dragging'); document.body.classList.remove('resizing');
+    apply(leftNow(), true);
+  };
+  handle.addEventListener('pointerup', end);
+  handle.addEventListener('pointercancel', end);
+  handle.addEventListener('dblclick', e => { if (!e.target.closest('button')) apply(null, true); });
+
+  handle.addEventListener('keydown', e => {
+    if (e.target !== handle) return;
+    const w = leftNow();
+    const map = { ArrowLeft: w - STEP, ArrowRight: w + STEP, Home: MIN_LEFT, End: total() - MIN_MAP };
+    if (e.key in map) { e.preventDefault(); apply(map[e.key], true); }
+    else if (e.key === 'Enter') { e.preventDefault(); apply(null, true); }
+  });
+
+  handle.querySelectorAll('[data-preset]').forEach(b => b.addEventListener('click', () => {
+    const p = b.dataset.preset;
+    if (p === 'auto') apply(null, true);
+    else apply(p === 'wide' ? total() * 0.6 : MIN_LEFT, true);
+  }));
+})();
+</script>
 
 <!-- UNDO BAR -->
 <div id="undo-bar"><span id="undo-text"></span><button onclick="doUndo()">復原</button></div>
