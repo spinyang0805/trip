@@ -325,6 +325,7 @@ function renderSpot(dayId, sp, i, dayColor, total, sch = {}, isNext = false) {
       </div>
       <div class="sc-row2">
         ${timeHtml}
+        ${spotWxSpan(dayId, sp, sch.arrive)}
         ${stay ? `<span class="sc-stay">停 ${fmtStay(stay)}</span>` : ''}
         ${cost ? `<span class="sc-cost">${symbolFor(sp.costCurrency||baseCurrency)}${cost.toLocaleString()}</span>` : ''}
         ${booked ? '<span class="sc-booked" title="已記入費用頁">✓ 已記帳</span>' : ''}
@@ -521,46 +522,84 @@ window.doUndo = function() {
 };
 
 // ── WEATHER(Open-Meteo,免 key,只抓 16 天內)──
-const wxCache = {};
-// 用當天最後一個有定位的景點(通常是住宿/目的地),避免抓到出發地機場
+// 每個景點各自查自己位置的預報;有到達時間(或推算的「約 hh:mm」)就顯示那個小時,
+// 沒有時間顯示當天高低溫。同一天的所有地點合併成一次請求。
+// 天數標頭顯示當天最後一個有定位的景點(通常是住宿/目的地)的全天預報。
+const wxData = {};   // 'lat,lng,date' -> { hourly, daily } | 'loading' | null
+function wxKeyFor(sp, date) { return `${sp.lat.toFixed(2)},${sp.lng.toFixed(2)},${date}`; }
 function wxSpot(dayId) {
   const day = tripData.days?.[dayId];
   if (!day?.date) return null;
   return [...getSpotsArray(day)].reverse().find(s => s.lat && s.lng) || null;
 }
-function wxKey(dayId) {
-  const sp = wxSpot(dayId);
-  return sp ? `${sp.lat.toFixed(2)},${sp.lng.toFixed(2)},${tripData.days[dayId].date}` : null;
-}
 function wxIcon(c) {
   return c === 0 ? '☀️' : c <= 2 ? '🌤️' : c === 3 ? '☁️' : c <= 48 ? '🌫️' : c <= 57 ? '🌦️'
     : c <= 67 ? '🌧️' : c <= 77 ? '🌨️' : c <= 82 ? '🌧️' : '⛈️';
 }
+function wxReady(k) { const d = wxData[k]; return d && d !== 'loading' ? d : null; }
 function wxHtml(dayId) {
-  const v = wxCache[wxKey(dayId)];
-  return v && v !== 'loading' ? v : '';
+  const sp = wxSpot(dayId);
+  const d = sp && wxReady(wxKeyFor(sp, tripData.days[dayId].date));
+  if (!d) return '';
+  const place = sp.name || '';
+  return `<span title="${esc(place)} 的全天預報(Open-Meteo)">${wxIcon(d.daily.code)} ${Math.round(d.daily.max)}°/${Math.round(d.daily.min)}°${d.daily.rain != null ? ` ☔${d.daily.rain}%` : ''}<span class="wx-place">📍${esc(place.length > 8 ? place.slice(0, 8) + '…' : place)}</span></span>`;
+}
+function spotWxHtml(k, arrive) {
+  const d = wxReady(k);
+  if (!d) return '';
+  if (arrive != null) {
+    const hr = Math.min(23, Math.max(0, Math.round(arrive / 60)));
+    const t = d.hourly.temp?.[hr], r = d.hourly.rain?.[hr], c = d.hourly.code?.[hr];
+    if (t == null) return '';
+    return `${wxIcon(c)} ${Math.round(t)}°${r != null ? ` ☔${r}%` : ''}`;
+  }
+  return `${wxIcon(d.daily.code)} ${Math.round(d.daily.max)}°/${Math.round(d.daily.min)}°`;
+}
+function spotWxSpan(dayId, sp, arrive) {
+  const date = tripData.days?.[dayId]?.date;
+  if (!date || !sp.lat || !sp.lng) return '';
+  const k = wxKeyFor(sp, date);
+  const tip = arrive != null ? `${minToHm(arrive)} 在這裡的天氣預報` : '這個地點當天的天氣預報';
+  return `<span class="sc-wx" data-k="${k}" data-a="${arrive ?? ''}" title="${tip}">${spotWxHtml(k, arrive)}</span>`;
+}
+function refreshWxDom() {
+  document.querySelectorAll('.sc-wx').forEach(el =>
+    el.innerHTML = spotWxHtml(el.dataset.k, el.dataset.a === '' ? null : +el.dataset.a));
+  Object.keys(tripData.days || {}).forEach(dayId => {
+    const el = document.getElementById('wx-' + dayId);
+    if (el) el.innerHTML = wxHtml(dayId);
+  });
 }
 function loadWeather(dayKeys) {
   const t0 = new Date(todayStr() + 'T00:00:00');
   dayKeys.forEach(dayId => {
-    const k = wxKey(dayId);
-    if (!k || k in wxCache) return;
-    const [lat, lng, date] = k.split(',');
+    const date = tripData.days[dayId]?.date;
+    if (!date) return;
     const diff = (new Date(date + 'T00:00:00') - t0) / 864e5;
     if (diff < 0 || diff > 15) return;
-    wxCache[k] = 'loading';
-    fetch(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=auto&start_date=${date}&end_date=${date}`)
+    const keys = [...new Set(getSpotsArray(tripData.days[dayId]).filter(s => s.lat && s.lng)
+      .map(s => wxKeyFor(s, date)))].filter(k => !(k in wxData));
+    if (!keys.length) return;
+    keys.forEach(k => wxData[k] = 'loading');
+    const lats = keys.map(k => k.split(',')[0]).join(','), lngs = keys.map(k => k.split(',')[1]).join(',');
+    fetch(`https://api.open-meteo.com/v1/forecast?latitude=${lats}&longitude=${lngs}` +
+      `&hourly=temperature_2m,precipitation_probability,weather_code` +
+      `&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max` +
+      `&timezone=auto&start_date=${date}&end_date=${date}`)
       .then(r => r.json())
       .then(j => {
-        const d = j.daily;
-        if (!d?.time?.length) { wxCache[k] = ''; return; }
-        const rain = d.precipitation_probability_max?.[0];
-        const place = wxSpot(dayId)?.name || '';
-        wxCache[k] = `<span title="${esc(place)} 的天氣預報(Open-Meteo)">${wxIcon(d.weather_code[0])} ${Math.round(d.temperature_2m_max[0])}°/${Math.round(d.temperature_2m_min[0])}°${rain != null ? ` ☔${rain}%` : ''}<span class="wx-place">📍${esc(place.length > 8 ? place.slice(0, 8) + '…' : place)}</span></span>`;
-        const el = document.getElementById('wx-' + dayId);
-        if (el) el.innerHTML = wxCache[k];
+        const list = Array.isArray(j) ? j : [j];   // 多個地點回傳陣列,單一地點回傳物件
+        keys.forEach((k, i) => {
+          const r = list[i];
+          wxData[k] = r?.daily?.time?.length ? {
+            hourly: { temp: r.hourly.temperature_2m, rain: r.hourly.precipitation_probability, code: r.hourly.weather_code },
+            daily: { max: r.daily.temperature_2m_max[0], min: r.daily.temperature_2m_min[0],
+                     code: r.daily.weather_code[0], rain: r.daily.precipitation_probability_max?.[0] }
+          } : null;
+        });
+        refreshWxDom();
       })
-      .catch(() => { wxCache[k] = ''; });
+      .catch(() => keys.forEach(k => wxData[k] = null));
   });
 }
 
@@ -2389,6 +2428,8 @@ body.readonly .day-date, body.readonly #budget-total, body.readonly #trip-title 
 .doc-poi a { color:var(--text); }
 .day-dow { font-size:.72rem; color:var(--text); white-space:nowrap; }
 .dow-jp { color:var(--muted); margin-left:4px; }
+.sc-wx { color:var(--text); white-space:nowrap; }
+.sc-wx:empty { display:none; }
 .wx-place { color:var(--muted); font-size:.62rem; margin-left:4px; }
 .info-form { display:flex; flex-direction:column; gap:8px; border-top:1px solid var(--border); padding-top:12px; margin-top:8px; }
 #check-list { margin-top:10px; }
